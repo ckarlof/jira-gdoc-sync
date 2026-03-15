@@ -29,17 +29,62 @@ function jiraGet(path) {
   return { code: response.getResponseCode(), body: response.getContentText() };
 }
 
+function jiraSearch(jql, fields, maxResults) {
+  var cfg     = getConfig();
+  var headers = {
+    'Authorization': jiraAuthHeader(),
+    'Accept':        'application/json',
+    'Content-Type':  'application/json'
+  };
+  var body = JSON.stringify({
+    jql:        jql,
+    fields:     fields || ['summary', 'assignee'],
+    maxResults: maxResults || 50
+  });
+
+  // Try the newer /search/jql endpoint first, fall back to /search
+  var endpoints = [
+    cfg.baseUrl + '/rest/api/3/search/jql',
+    cfg.baseUrl + '/rest/api/3/search'
+  ];
+
+  for (var i = 0; i < endpoints.length; i++) {
+    var response = UrlFetchApp.fetch(endpoints[i], {
+      method: 'POST', headers: headers, payload: body, muteHttpExceptions: true
+    });
+    var code = response.getResponseCode();
+    if (code !== 404 && code !== 410) {
+      Logger.log('jiraSearch using endpoint: ' + endpoints[i] + ' (HTTP ' + code + ')');
+      return { code: code, body: response.getContentText() };
+    }
+  }
+
+  return { code: 410, body: 'All search endpoints returned 410/404' };
+}
+
 // ── Core ──────────────────────────────────────────────────────────────────────
+
+// Jira status lozenge colors (matches Jira's subtle palette)
+var STATUS_COLORS = {
+  'neutral': { bg: '#DFE1E6', fg: '#172B4D' },
+  'purple':  { bg: '#EAE6FF', fg: '#403294' },
+  'blue':    { bg: '#DEEBFF', fg: '#0747A6' },
+  'red':     { bg: '#FFEBE6', fg: '#BF2600' },
+  'yellow':  { bg: '#FFFAE6', fg: '#7A5200' },
+  'green':   { bg: '#E3FCEF', fg: '#006644' }
+};
 
 /**
  * Walks an ADF document and returns an array of segments:
- *   [{ text, bold, italic, underline, strike, code, url }, ...]
+ *   [{ text, bold, italic, underline, strike, code, url, bgColor, fgColor }, ...]
  * Marks are inherited from parent nodes down to text leaves.
+ * Status nodes render as padded, colored lozenges matching Jira's palette.
  */
 function adfToSegments(adfBody) {
   if (!adfBody || adfBody.version === undefined) {
     return [{ text: String(adfBody || ''), bold: false, italic: false,
-              underline: false, strike: false, code: false, url: null }];
+              underline: false, strike: false, code: false, url: null,
+              bgColor: null, fgColor: null }];
   }
 
   var segments = [];
@@ -53,13 +98,16 @@ function adfToSegments(adfBody) {
       underline: !!marks.underline,
       strike:    !!marks.strike,
       code:      !!marks.code,
-      url:       marks.url || null
+      url:       marks.url    || null,
+      bgColor:   marks.bgColor || null,
+      fgColor:   marks.fgColor || null
     });
   }
 
   function mergeMark(marks, mark) {
     var m = { bold: marks.bold, italic: marks.italic, underline: marks.underline,
-              strike: marks.strike, code: marks.code, url: marks.url };
+              strike: marks.strike, code: marks.code, url: marks.url,
+              bgColor: marks.bgColor, fgColor: marks.fgColor };
     switch (mark.type) {
       case 'strong':    m.bold      = true; break;
       case 'em':        m.italic    = true; break;
@@ -72,7 +120,8 @@ function adfToSegments(adfBody) {
   }
 
   var BASE_MARKS = { bold: false, italic: false, underline: false,
-                     strike: false, code: false, url: null };
+                     strike: false, code: false, url: null,
+                     bgColor: null, fgColor: null };
 
   function walk(node, marks) {
     if (!node) return;
@@ -84,11 +133,19 @@ function adfToSegments(adfBody) {
         return;
       }
       case 'hardBreak':
-        pushText('\n', marks);
+        pushText('\n', BASE_MARKS);
         return;
-      case 'status':
-        if (node.attrs && node.attrs.text) pushText(node.attrs.text, marks);
+      case 'status': {
+        if (!node.attrs || !node.attrs.text) return;
+        var color  = node.attrs.color || 'neutral';
+        var palette = STATUS_COLORS[color] || STATUS_COLORS['neutral'];
+        // Pad with spaces to simulate lozenge shape; uppercase matches Jira display
+        pushText(' ' + node.attrs.text.toUpperCase() + ' ', {
+          bold: true, italic: false, underline: false, strike: false,
+          code: false, url: null, bgColor: palette.bg, fgColor: palette.fg
+        });
         return;
+      }
       case 'emoji':
         if (node.attrs && node.attrs.text) pushText(node.attrs.text, marks);
         else if (node.attrs && node.attrs.shortName) pushText(node.attrs.shortName, marks);
@@ -101,7 +158,7 @@ function adfToSegments(adfBody) {
         if (node.attrs && node.attrs.url) pushText(node.attrs.url, marks);
         return;
       case 'rule':
-        pushText('\n---\n', marks);
+        pushText('\n---\n', BASE_MARKS);
         return;
     }
     (node.content || []).forEach(function(child) { walk(child, marks); });
@@ -113,7 +170,7 @@ function adfToSegments(adfBody) {
 
   walk(adfBody, BASE_MARKS);
 
-  // Trim leading/trailing newline segments
+  // Trim leading/trailing whitespace-only segments
   while (segments.length && segments[0].text.trim() === '') segments.shift();
   while (segments.length && segments[segments.length - 1].text.trim() === '') segments.pop();
   return segments;
@@ -137,6 +194,8 @@ function writeSegmentsToCell(cell, segments) {
     if (s.strike)    t.setStrikethrough(pos, end, true);
     if (s.code)      t.setFontFamily(pos, end, 'Courier New');
     if (s.url)       t.setLinkUrl(pos, end, s.url);
+    if (s.bgColor)   t.setBackgroundColor(pos, end, s.bgColor);
+    if (s.fgColor)   t.setForegroundColor(pos, end, s.fgColor);
     pos += s.text.length;
   });
 }
@@ -158,76 +217,258 @@ function getLatestComment(ticketId) {
   return header.concat(adfToSegments(c.body));
 }
 
-// ── Core: fetch ticket summary ────────────────────────────────────────────────
-
-function getTicketSummary(ticketId) {
-  var result = jiraGet('/rest/api/3/issue/' + ticketId + '?fields=summary,assignee');
-
-  if (result.code !== 200) {
-    return { summary: 'Error ' + result.code, url: null, assignee: '' };
-  }
-
-  var data     = JSON.parse(result.body);
-  var summary  = data.fields && data.fields.summary ? data.fields.summary : '(no summary)';
-  var assignee = data.fields && data.fields.assignee ? data.fields.assignee.displayName : 'Unassigned';
-  var cfg      = getConfig();
-  var url      = cfg.baseUrl + '/browse/' + ticketId;
-
-  return { summary: summary, url: url, assignee: assignee };
-}
-
-// ── Main: sync table in the active Google Doc ─────────────────────────────────
+// ── OKR data fetching ─────────────────────────────────────────────────────────
 
 /**
- * Finds the first table in the document where column 1 contains Jira ticket IDs
- * (skipping the header row automatically), fetches each ticket's summary, and
- * writes it as a hyperlink back to the Jira ticket in column 2.
+ * Logs the raw structure of an objective ticket to help diagnose hierarchy issues.
+ * Run this from the Apps Script editor when KRs aren't being found.
  */
-function syncJiraComments() {
-  var doc    = DocumentApp.getActiveDocument();
-  var body   = doc.getBody();
-  var tables = body.getTables();
+function debugKR() {
+  var krKey        = 'INFOKR-7';
+  var objectiveKey = 'INFOKR-1';
 
-  if (tables.length === 0) {
-    DocumentApp.getUi().alert('No tables found in this document.');
+  var result = jiraGet('/rest/api/3/issue/' + krKey + '?fields=*all');
+  if (result.code !== 200) {
+    Logger.log('Failed: HTTP ' + result.code + '\n' + result.body);
     return;
   }
 
-  var TICKET_RE = /^[A-Z]+-\d+$/;
-  var table   = tables[0];
-  var numRows = table.getNumRows();
-  var updated = 0;
-
-  for (var i = 0; i < numRows; i++) {
-    var row = table.getRow(i);
-    if (row.getNumCells() < 2) continue;
-
-    var ticketId = row.getCell(0).getText().trim();
-    if (!TICKET_RE.test(ticketId)) continue; // skips header and non-ticket rows
-
-    Logger.log('Fetching summary for ' + ticketId + '...');
-    var ticket = getTicketSummary(ticketId);
-
-    var cell = row.getCell(1);
-    cell.clear();
-    var text = cell.editAsText();
-    text.setText(ticket.summary);
-    if (ticket.url) {
-      text.setLinkUrl(0, ticket.summary.length - 1, ticket.url);
+  var fields = JSON.parse(result.body).fields;
+  Logger.log('=== Fields on ' + krKey + ' that reference ' + objectiveKey + ' ===');
+  Object.keys(fields).forEach(function(key) {
+    var val = fields[key];
+    var str = JSON.stringify(val);
+    if (str && str.indexOf(objectiveKey) !== -1) {
+      Logger.log(key + ': ' + str);
     }
+  });
 
-    if (row.getNumCells() >= 3) {
-      row.getCell(2).clear().editAsText().setText(ticket.assignee);
+  Logger.log('=== All non-null fields on ' + krKey + ' ===');
+  Object.keys(fields).forEach(function(key) {
+    var val = fields[key];
+    if (val !== null && val !== undefined && val !== '') {
+      Logger.log(key + ': ' + JSON.stringify(val).substring(0, 120));
     }
+  });
+}
 
-    if (row.getNumCells() >= 4) {
-      writeSegmentsToCell(row.getCell(3), getLatestComment(ticketId));
-    }
+function debugObjective() {
+  var key = 'INFOKR-1';
 
-    updated++;
+  var issueResult = jiraGet('/rest/api/3/issue/' + key + '?fields=summary,issuetype,subtasks,parent,issuelinks');
+  if (issueResult.code !== 200) {
+    Logger.log('Failed to fetch issue: HTTP ' + issueResult.code);
+    Logger.log(issueResult.body);
+    return;
   }
 
-  DocumentApp.getUi().alert('Done. Updated ' + updated + ' row(s).');
+  var issue = JSON.parse(issueResult.body);
+  var f = issue.fields;
+
+  Logger.log('=== ' + key + ' ===');
+  Logger.log('Issue type : ' + (f.issuetype ? f.issuetype.name : 'unknown'));
+  Logger.log('Summary    : ' + f.summary);
+  Logger.log('Parent     : ' + (f.parent ? f.parent.key : 'none'));
+
+  var subtasks = f.subtasks || [];
+  Logger.log('Subtasks (' + subtasks.length + '):');
+  subtasks.forEach(function(s) { Logger.log('  ' + s.key + ': ' + s.fields.summary); });
+
+  var links = f.issuelinks || [];
+  Logger.log('Issue links (' + links.length + '):');
+  links.forEach(function(l) {
+    var related = l.outwardIssue || l.inwardIssue;
+    var dir     = l.outwardIssue ? 'outward' : 'inward';
+    var type    = l.type ? l.type.name + ' (' + dir + ')' : dir;
+    Logger.log('  [' + type + '] ' + (related ? related.key + ': ' + related.fields.summary : '?'));
+  });
+
+  // List all custom fields with "parent" in the name
+  Logger.log('--- Parent-related custom fields ---');
+  var fieldsResult = jiraGet('/rest/api/3/field');
+  if (fieldsResult.code === 200) {
+    JSON.parse(fieldsResult.body).forEach(function(f) {
+      if (f.name && f.name.toLowerCase().indexOf('parent') !== -1) {
+        Logger.log('  ' + f.id + '  "' + f.name + '"  custom=' + f.custom);
+      }
+    });
+  }
+
+  // JQL probes
+  Logger.log('--- JQL probes ---');
+  var parentFieldId = getParentLinkFieldId();
+  var strategies = [];
+  if (parentFieldId) strategies.push(parentFieldId + ' = "' + key + '"');
+  strategies = strategies.concat([
+    '"Parent Link" = "' + key + '"',
+    'parent = "'        + key + '"',
+    '"Epic Link" = "'   + key + '"',
+  ]);
+  strategies.forEach(function(jql) {
+    var r     = jiraSearch(jql, ['summary'], 1);
+    var count = r.code === 200 ? JSON.parse(r.body).total : ('HTTP ' + r.code);
+    Logger.log(jql + '  →  ' + count);
+  });
+}
+
+/**
+ * Fetches all Jira fields and returns the field ID of the Advanced Roadmaps
+ * parent-link field (the custom field that stores hierarchy above Epic level).
+ * Caches the result in UserProperties to avoid repeated API calls.
+ */
+function getParentLinkFieldId() {
+  var props   = PropertiesService.getUserProperties();
+  var cached  = props.getProperty('JIRA_PARENT_LINK_FIELD_ID');
+  if (cached) return cached;
+
+  var result = jiraGet('/rest/api/3/field');
+  if (result.code !== 200) return null;
+
+  var fields = JSON.parse(result.body);
+
+  // Priority: exact name match first, then any custom field with "parent" in the name
+  var CANDIDATE_NAMES = ['Parent Link', 'Parent link', 'ParentLink'];
+  var found = null;
+
+  for (var i = 0; i < fields.length; i++) {
+    var f = fields[i];
+    if (!f.custom) continue;
+    if (CANDIDATE_NAMES.indexOf(f.name) !== -1) { found = f; break; }
+    if (!found && f.name && f.name.toLowerCase().indexOf('parent') !== -1) {
+      found = f;
+    }
+  }
+
+  if (found) {
+    Logger.log('Parent link field: ' + found.name + ' (' + found.id + ')');
+    props.setProperty('JIRA_PARENT_LINK_FIELD_ID', found.id);
+    return found.id;
+  }
+
+  Logger.log('Could not find a parent link custom field');
+  return null;
+}
+
+/**
+ * Fetches child issues of an objective. Tries multiple JQL strategies,
+ * including querying by numeric issue ID which works when key-based queries fail.
+ */
+function fetchChildren(objectiveKey) {
+  var cfg = getConfig();
+
+  var strategies = [
+    'parent = ' + objectiveKey + ' ORDER BY created ASC',
+    'issuekey in childIssuesOf("' + objectiveKey + '") ORDER BY created ASC',
+  ];
+
+  for (var i = 0; i < strategies.length; i++) {
+    var result = jiraSearch(strategies[i], ['summary', 'assignee'], 50);
+    Logger.log('[' + strategies[i] + '] → HTTP ' + result.code +
+               (result.code === 200 ? ', total=' + JSON.parse(result.body).total : ''));
+    if (result.code !== 200) continue;
+    var data = JSON.parse(result.body);
+    if (!data.issues || data.issues.length === 0) continue;
+
+    Logger.log(objectiveKey + ': found ' + data.issues.length + ' KR(s) via [' + strategies[i] + ']');
+    return data.issues.map(function(issue) {
+      return {
+        key:          issue.key,
+        summary:      (issue.fields && issue.fields.summary) || '(no summary)',
+        url:          cfg.baseUrl + '/browse/' + issue.key,
+        assigneeName: (issue.fields && issue.fields.assignee)
+                        ? issue.fields.assignee.displayName : 'Unassigned'
+      };
+    });
+  }
+
+  Logger.log(objectiveKey + ': no KRs found with any strategy');
+  return [];
+}
+
+/**
+ * Fetches an objective's summary and its child KRs from Jira.
+ */
+function fetchObjectiveData(objectiveKey) {
+  var objResult        = jiraGet('/rest/api/3/issue/' + objectiveKey + '?fields=summary');
+  var objectiveSummary = objectiveKey;
+  if (objResult.code === 200) {
+    var objData      = JSON.parse(objResult.body);
+    objectiveSummary = (objData.fields && objData.fields.summary) || objectiveKey;
+  }
+
+  return { key: objectiveKey, summary: objectiveSummary, krs: fetchChildren(objectiveKey) };
+}
+
+// ── OKR document builder ──────────────────────────────────────────────────────
+
+var HEADER_COLS = ['Summary', 'Assignee', 'Last Comment'];
+
+/**
+ * Clears the document and builds one table per objective.
+ * Each table row represents a KR (child ticket) of that objective.
+ */
+function buildOKRTables() {
+  var props         = PropertiesService.getUserProperties();
+  var keysRaw       = props.getProperty('OBJECTIVE_KEYS') || '';
+  var objectiveKeys = keysRaw.split(',').map(function(k) { return k.trim(); })
+                             .filter(function(k) { return k.length > 0; });
+
+  if (objectiveKeys.length === 0) {
+    DocumentApp.getUi().alert('No objective keys configured.\nUse Jira Sync > Configure objectives.');
+    return;
+  }
+
+  var doc  = DocumentApp.getActiveDocument();
+  var body = doc.getBody();
+  body.clear();
+
+  objectiveKeys.forEach(function(objectiveKey) {
+    Logger.log('Building table for ' + objectiveKey + '...');
+    var data = fetchObjectiveData(objectiveKey);
+
+    // Objective heading: "INFOKR-1: Summary text"
+    var headingText = objectiveKey + ': ' + data.summary;
+    body.appendParagraph(headingText)
+        .setHeading(DocumentApp.ParagraphHeading.HEADING2);
+
+    if (data.krs.length === 0) {
+      body.appendParagraph('(no KRs found)').setItalic(true);
+      body.appendParagraph('');
+      return;
+    }
+
+    var table = body.appendTable();
+
+    // Header row
+    var headerRow = table.appendTableRow();
+    HEADER_COLS.forEach(function(label) {
+      var cell = headerRow.appendTableCell(label);
+      cell.editAsText().setBold(0, label.length - 1, true);
+    });
+
+    // One row per KR
+    data.krs.forEach(function(kr) {
+      var row = table.appendTableRow();
+
+      // Col 1: KR summary as hyperlink to Jira
+      var summaryCell = row.appendTableCell('');
+      var t = summaryCell.editAsText();
+      t.setText(kr.summary);
+      t.setLinkUrl(0, kr.summary.length - 1, kr.url);
+
+      // Col 2: Assignee
+      row.appendTableCell(kr.assigneeName);
+
+      // Col 3: Latest comment with rich formatting
+      var commentCell = row.appendTableCell('');
+      writeSegmentsToCell(commentCell, getLatestComment(kr.key));
+    });
+
+    // Spacer between tables
+    body.appendParagraph('');
+  });
+
+  DocumentApp.getUi().alert('Done. Built tables for ' + objectiveKeys.length + ' objective(s).');
 }
 
 // ── Verification ──────────────────────────────────────────────────────────────
@@ -269,14 +510,35 @@ function configureCredentials() {
   ui.alert('Credentials saved. Run "Verify API token" to confirm they work.');
 }
 
+function configureObjectives() {
+  var ui    = DocumentApp.getUi();
+  var props = PropertiesService.getUserProperties();
+  var current = props.getProperty('OBJECTIVE_KEYS') || '';
+
+  var result = ui.prompt(
+    'Configure Objective Keys',
+    'Enter Jira objective keys separated by commas (current: ' + (current || 'none') + ')\n' +
+    'e.g. INFOKR-1, INFOKR-5, INFOKR-12',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (result.getSelectedButton() !== ui.Button.OK) return;
+
+  props.setProperty('OBJECTIVE_KEYS', result.getResponseText().trim());
+  ui.alert('Saved. Run "Build OKR tables" to regenerate the document.');
+}
+
 // ── Menu ──────────────────────────────────────────────────────────────────────
 
 function onOpen() {
   DocumentApp.getUi()
     .createMenu('Jira Sync')
-    .addItem('Sync ticket summaries', 'syncJiraComments')
+    .addItem('Build OKR tables', 'buildOKRTables')
     .addItem('Verify API token', 'verifyJiraToken')
     .addSeparator()
+    .addItem('Configure objectives', 'configureObjectives')
     .addItem('Configure credentials', 'configureCredentials')
+    .addSeparator()
+    .addItem('Debug objective (INFOKR-1)', 'debugObjective')
+    .addItem('Debug KR (INFOKR-7)', 'debugKR')
     .addToUi();
 }
