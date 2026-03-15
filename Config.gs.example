@@ -1,0 +1,6 @@
+// Copy this file to Config.gs and fill in your values.
+// Get an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+
+var JIRA_BASE_URL  = 'https://your-domain.atlassian.net';
+var JIRA_EMAIL     = 'your-email@example.com';
+var JIRA_API_TOKEN = 'your-api-token-here';
