@@ -216,9 +216,35 @@ function adfToBlocks(adfBody) {
 }
 
 /**
+ * Scans unlinked text segments for bare http(s) URLs and splits them into
+ * linked segments, leaving surrounding text and already-linked segments alone.
+ */
+function autoLinkSegments(segments) {
+  var URL_RE = /https?:\/\/[^\s<>'"]+/g;
+  var result = [];
+  segments.forEach(function(s) {
+    if (s.url || !s.text) { result.push(s); return; }
+    URL_RE.lastIndex = 0;
+    var text = s.text, lastIndex = 0, found = false, match;
+    while ((match = URL_RE.exec(text)) !== null) {
+      found = true;
+      if (match.index > lastIndex)
+        result.push(Object.assign({}, s, { text: text.substring(lastIndex, match.index) }));
+      result.push(Object.assign({}, s, { text: match[0], url: match[0] }));
+      lastIndex = match.index + match[0].length;
+    }
+    if (!found) { result.push(s); return; }
+    if (lastIndex < text.length)
+      result.push(Object.assign({}, s, { text: text.substring(lastIndex) }));
+  });
+  return result;
+}
+
+/**
  * Applies rich-text formatting from segments onto a Text object.
  */
 function applySegmentsToText(t, segments) {
+  segments = autoLinkSegments(segments);
   var fullText = segments.map(function(s) { return s.text; }).join('');
   t.setText(fullText);
   var pos = 0;
@@ -570,9 +596,18 @@ function buildOKRTables() {
     Logger.log('Building table for ' + objectiveKey + '...');
     var data = fetchObjectiveData(objectiveKey);
 
-    var headingText = objectiveKey + ': ' + data.summary;
-    body.appendParagraph(headingText)
-        .setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    // Heading: link the short name (text before first ':') to the Jira issue;
+    // drop the key prefix entirely.
+    var cfg         = getConfig();
+    var objUrl      = cfg.baseUrl + '/browse/' + objectiveKey;
+    var colonIdx    = data.summary.indexOf(':');
+    var linkText    = colonIdx !== -1 ? data.summary.substring(0, colonIdx)      : data.summary;
+    var afterLink   = colonIdx !== -1 ? data.summary.substring(colonIdx)          : '';
+    var headingPara = body.appendParagraph('');
+    headingPara.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+    var ht = headingPara.editAsText();
+    ht.setText(linkText + afterLink);
+    ht.setLinkUrl(0, linkText.length - 1, objUrl);
 
     if (data.krs.length === 0) {
       body.appendParagraph('(no KRs found)').setItalic(true);
@@ -685,13 +720,9 @@ function onOpen() {
   DocumentApp.getUi()
     .createMenu('Jira Sync')
     .addItem('Build OKR tables', 'buildOKRTables')
-    .addItem('Verify API token', 'verifyJiraToken')
     .addSeparator()
     .addItem('Configure objectives', 'configureObjectives')
     .addItem('Configure credentials', 'configureCredentials')
     .addItem('Configure style', 'configureStyle')
-    .addSeparator()
-    .addItem('Debug objective (INFOKR-1)', 'debugObjective')
-    .addItem('Debug KR (INFOKR-7)', 'debugKR')
     .addToUi();
 }
