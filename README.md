@@ -70,6 +70,18 @@ Go to **Jira Sync → Configure style** to adjust:
 - **Header text color** — default `#FFFFFF` (white)
 - **Column widths** — in points (72 pt = 1 inch); default `175, 75, 600`
 
+## Best practices
+
+### Preserving a historical record
+
+Each run overwrites the current tab. To build up a history of snapshots:
+
+1. In Google Docs, create a new tab
+2. Run **Jira Sync → Build OKR tables** in the new tab
+3. Name the tab with the timestamp written at the top of the output (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`)
+
+Repeat for each sync cycle. Each tab becomes an archived, dated snapshot.
+
 ## Files
 
 | File | Description |
