@@ -75,33 +75,25 @@ var STATUS_COLORS = {
 };
 
 /**
- * Walks an ADF document and returns an array of segments:
- *   [{ text, bold, italic, underline, strike, code, url, bgColor, fgColor }, ...]
- * Marks are inherited from parent nodes down to text leaves.
- * Status nodes render as padded, colored lozenges matching Jira's palette.
+ * Parses an ADF document into an array of blocks:
+ *   { type: 'para', segments: [...] }
+ *   { type: 'listItem', level: N, ordered: bool, segments: [...] }
+ * Each segment: { text, bold, italic, underline, strike, code, url, bgColor, fgColor }
  */
-function adfToSegments(adfBody) {
+function adfToBlocks(adfBody) {
+  var EMPTY_SEG = { bold: false, italic: false, underline: false,
+                    strike: false, code: false, url: null, bgColor: null, fgColor: null };
+
   if (!adfBody || adfBody.version === undefined) {
-    return [{ text: String(adfBody || ''), bold: false, italic: false,
-              underline: false, strike: false, code: false, url: null,
-              bgColor: null, fgColor: null }];
+    return [{ type: 'para', segments: [Object.assign({ text: String(adfBody || '') }, EMPTY_SEG)] }];
   }
 
-  var segments = [];
+  var blocks = [];
 
-  function pushText(text, marks) {
-    if (!text) return;
-    segments.push({
-      text:      text,
-      bold:      !!marks.bold,
-      italic:    !!marks.italic,
-      underline: !!marks.underline,
-      strike:    !!marks.strike,
-      code:      !!marks.code,
-      url:       marks.url    || null,
-      bgColor:   marks.bgColor || null,
-      fgColor:   marks.fgColor || null
-    });
+  function seg(text, marks) {
+    return { text: text, bold: !!marks.bold, italic: !!marks.italic,
+             underline: !!marks.underline, strike: !!marks.strike, code: !!marks.code,
+             url: marks.url || null, bgColor: marks.bgColor || null, fgColor: marks.fgColor || null };
   }
 
   function mergeMark(marks, mark) {
@@ -119,70 +111,115 @@ function adfToSegments(adfBody) {
     return m;
   }
 
-  var BASE_MARKS = { bold: false, italic: false, underline: false,
-                     strike: false, code: false, url: null,
-                     bgColor: null, fgColor: null };
-
-  function walk(node, marks) {
-    if (!node) return;
+  // Walk inline nodes, return segments array
+  function inlineSegs(node, marks) {
+    if (!node) return [];
+    var out = [];
     switch (node.type) {
       case 'text': {
         var m = marks;
-        (node.marks || []).forEach(function(mark) { m = mergeMark(m, mark); });
-        pushText(node.text || '', m);
-        return;
+        (node.marks || []).forEach(function(mk) { m = mergeMark(m, mk); });
+        if (node.text) out.push(seg(node.text, m));
+        return out;
       }
       case 'hardBreak':
-        pushText('\n', BASE_MARKS);
-        return;
+        out.push(seg('\n', EMPTY_SEG));
+        return out;
       case 'status': {
-        if (!node.attrs || !node.attrs.text) return;
-        var color  = node.attrs.color || 'neutral';
+        if (!node.attrs || !node.attrs.text) return out;
+        var color   = node.attrs.color || 'neutral';
         var palette = STATUS_COLORS[color] || STATUS_COLORS['neutral'];
-        // Pad with spaces to simulate lozenge shape; uppercase matches Jira display
-        pushText(' ' + node.attrs.text.toUpperCase() + ' ', {
-          bold: true, italic: false, underline: false, strike: false,
-          code: false, url: null, bgColor: palette.bg, fgColor: palette.fg
-        });
-        return;
+        out.push({ text: ' ' + node.attrs.text.toUpperCase() + ' ',
+                   bold: true, italic: false, underline: false, strike: false,
+                   code: false, url: null, bgColor: palette.bg, fgColor: palette.fg });
+        return out;
       }
       case 'emoji':
-        if (node.attrs && node.attrs.text) pushText(node.attrs.text, marks);
-        else if (node.attrs && node.attrs.shortName) pushText(node.attrs.shortName, marks);
-        return;
+        if (node.attrs && node.attrs.text) out.push(seg(node.attrs.text, marks));
+        else if (node.attrs && node.attrs.shortName) out.push(seg(node.attrs.shortName, marks));
+        return out;
       case 'mention':
-        if (node.attrs && node.attrs.text) pushText(node.attrs.text, marks);
-        return;
+        if (node.attrs && node.attrs.text) out.push(seg(node.attrs.text, marks));
+        return out;
       case 'inlineCard':
       case 'blockCard':
-        if (node.attrs && node.attrs.url) pushText(node.attrs.url, marks);
-        return;
-      case 'rule':
-        pushText('\n---\n', BASE_MARKS);
-        return;
+        if (node.attrs && node.attrs.url) out.push(seg(node.attrs.url, marks));
+        return out;
     }
-    (node.content || []).forEach(function(child) { walk(child, marks); });
-    if (['paragraph', 'heading', 'bulletList', 'orderedList', 'listItem',
-         'blockquote', 'codeBlock', 'panel'].indexOf(node.type) !== -1) {
-      pushText('\n', BASE_MARKS);
-    }
+    // recurse for inline wrappers
+    (node.content || []).forEach(function(child) {
+      out = out.concat(inlineSegs(child, marks));
+    });
+    return out;
   }
 
-  walk(adfBody, BASE_MARKS);
+  function collectSegs(nodes, marks) {
+    var out = [];
+    (nodes || []).forEach(function(n) { out = out.concat(inlineSegs(n, marks)); });
+    return out;
+  }
 
-  // Trim leading/trailing whitespace-only segments
-  while (segments.length && segments[0].text.trim() === '') segments.shift();
-  while (segments.length && segments[segments.length - 1].text.trim() === '') segments.pop();
-  return segments;
+  function pushPara(segs) {
+    if (segs.length) blocks.push({ type: 'para', segments: segs });
+  }
+
+  function walkListItem(node, level, ordered) {
+    (node.content || []).forEach(function(child) {
+      if (child.type === 'paragraph') {
+        var segs = collectSegs(child.content, EMPTY_SEG);
+        if (segs.length) blocks.push({ type: 'listItem', level: level, ordered: ordered, segments: segs });
+      } else if (child.type === 'bulletList') {
+        (child.content || []).forEach(function(item) { walkListItem(item, level + 1, false); });
+      } else if (child.type === 'orderedList') {
+        (child.content || []).forEach(function(item) { walkListItem(item, level + 1, true); });
+      } else {
+        walkBlocks([child]);
+      }
+    });
+  }
+
+  function walkBlocks(nodes) {
+    (nodes || []).forEach(function(node) {
+      switch (node.type) {
+        case 'paragraph':
+        case 'heading':
+          pushPara(collectSegs(node.content, EMPTY_SEG));
+          break;
+        case 'codeBlock':
+          pushPara(collectSegs(node.content,
+            { bold: false, italic: false, underline: false, strike: false,
+              code: true, url: null, bgColor: null, fgColor: null }));
+          break;
+        case 'bulletList':
+          (node.content || []).forEach(function(item) { walkListItem(item, 0, false); });
+          break;
+        case 'orderedList':
+          (node.content || []).forEach(function(item) { walkListItem(item, 0, true); });
+          break;
+        case 'rule':
+          pushPara([seg('---', EMPTY_SEG)]);
+          break;
+        case 'blockquote':
+        case 'panel':
+        case 'doc':
+          walkBlocks(node.content);
+          break;
+        case 'listItem':
+          walkListItem(node, 0, false);
+          break;
+      }
+    });
+  }
+
+  walkBlocks(adfBody.content);
+  return blocks;
 }
 
 /**
- * Writes an array of styled segments into a table cell, preserving formatting.
+ * Applies rich-text formatting from segments onto a Text object.
  */
-function writeSegmentsToCell(cell, segments) {
-  cell.clear();
+function applySegmentsToText(t, segments) {
   var fullText = segments.map(function(s) { return s.text; }).join('');
-  var t = cell.editAsText();
   t.setText(fullText);
   var pos = 0;
   segments.forEach(function(s) {
@@ -200,21 +237,72 @@ function writeSegmentsToCell(cell, segments) {
   });
 }
 
+/**
+ * Writes an array of blocks into a table cell.
+ * Para blocks become paragraphs; listItem blocks become native Google Doc list items
+ * with proper nesting levels.
+ */
+function writeBlocksToCell(cell, blocks) {
+  cell.clear();
+  if (!blocks || !blocks.length) return;
+
+  var cellIsEmpty    = true;   // after clear(), one empty para remains
+  var firstListItem  = null;   // anchor for setListId grouping
+  var prevWasList    = false;
+
+  blocks.forEach(function(block) {
+    if (block.type === 'listItem') {
+      var item = cell.appendListItem('');
+      item.setNestingLevel(block.level || 0);
+      item.setGlyphType(block.ordered
+        ? DocumentApp.GlyphType.NUMBER
+        : DocumentApp.GlyphType.BULLET);
+
+      if (!firstListItem || !prevWasList) {
+        // Start of a new list — this item becomes the anchor
+        firstListItem = item;
+        if (cellIsEmpty) {
+          // Remove the leading empty paragraph that cell.clear() leaves behind
+          try { cell.removeChild(cell.getChild(0)); } catch(e) {}
+          cellIsEmpty = false;
+        }
+      } else {
+        item.setListId(firstListItem);
+      }
+      applySegmentsToText(item.editAsText(), block.segments);
+      prevWasList = true;
+    } else {
+      // para block
+      var para;
+      if (cellIsEmpty) {
+        para = cell.getChild(0).asParagraph();
+        cellIsEmpty = false;
+      } else {
+        para = cell.appendParagraph('');
+      }
+      applySegmentsToText(para.editAsText(), block.segments);
+      prevWasList   = false;
+      firstListItem = null;  // next list will start fresh
+    }
+  });
+}
+
 function getLatestComment(ticketId) {
+  var EMPTY = { bold: false, italic: false, underline: false,
+                strike: false, code: false, url: null, bgColor: null, fgColor: null };
   var result = jiraGet('/rest/api/3/issue/' + ticketId + '/comment?orderBy=-created&maxResults=1');
-  if (result.code !== 200) return [{ text: 'Error ' + result.code, bold: false, italic: false,
-                                     underline: false, strike: false, code: false, url: null }];
+  if (result.code !== 200)
+    return [{ type: 'para', segments: [Object.assign({ text: 'Error ' + result.code }, EMPTY)] }];
   var data = JSON.parse(result.body);
-  if (!data.comments || data.comments.length === 0) {
-    return [{ text: '(no comments)', bold: false, italic: false,
-              underline: false, strike: false, code: false, url: null }];
-  }
+  if (!data.comments || data.comments.length === 0)
+    return [{ type: 'para', segments: [Object.assign({ text: '(no comments)' }, EMPTY)] }];
   var c      = data.comments[0];
   var author = c.author ? c.author.displayName : 'Unknown';
   var date   = c.created ? c.created.substring(0, 10) : '';
-  var header = [{ text: '[' + author + ', ' + date + ']\n', bold: true, italic: false,
-                  underline: false, strike: false, code: false, url: null }];
-  return header.concat(adfToSegments(c.body));
+  var header = { type: 'para',
+                 segments: [Object.assign({ text: '[' + author + ', ' + date + ']' },
+                                          EMPTY, { bold: true })] };
+  return [header].concat(adfToBlocks(c.body));
 }
 
 // ── OKR data fetching ─────────────────────────────────────────────────────────
@@ -526,7 +614,7 @@ function buildOKRTables() {
 
       // Col 3: Latest comment with rich formatting
       var commentCell = row.appendTableCell('');
-      writeSegmentsToCell(commentCell, getLatestComment(kr.key));
+      writeBlocksToCell(commentCell, getLatestComment(kr.key));
     });
 
     body.appendParagraph('');
