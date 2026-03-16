@@ -1,17 +1,20 @@
 // Jira -> Google Doc table sync
-// Credentials are stored via Jira Sync > Configure credentials (never hardcoded).
+// Credentials (email + API token) are stored via Jira Sync > Configure credentials (never hardcoded).
+// All other configuration lives in Config.gs.
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getConfig() {
   var props = PropertiesService.getUserProperties();
-  var baseUrl = props.getProperty('JIRA_BASE_URL');
-  var email   = props.getProperty('JIRA_EMAIL');
-  var token   = props.getProperty('JIRA_API_TOKEN');
-  if (!baseUrl || !email || !token) {
+  var email = props.getProperty('JIRA_EMAIL');
+  var token = props.getProperty('JIRA_API_TOKEN');
+  if (!email || !token) {
     throw new Error('Jira credentials not set. Use Jira Sync > Configure credentials.');
   }
-  return { baseUrl: baseUrl, email: email, token: token };
+  if (!CONFIG.jira.baseUrl) {
+    throw new Error('CONFIG.jira.baseUrl is not set. Edit Config.gs.');
+  }
+  return { baseUrl: CONFIG.jira.baseUrl, email: email, token: token };
 }
 
 function jiraAuthHeader() {
@@ -513,61 +516,6 @@ function fetchObjectiveData(objectiveKey) {
   return { key: objectiveKey, summary: objectiveSummary, krs: fetchChildren(objectiveKey) };
 }
 
-// ── Table styling ─────────────────────────────────────────────────────────────
-
-var DEFAULT_STYLE = {
-  headerBgColor:   '#073763',  // dark blue
-  headerTextColor: '#FFFFFF',  // white
-  colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
-};
-
-function getStyle() {
-  var stored = PropertiesService.getUserProperties().getProperty('TABLE_STYLE');
-  if (!stored) return DEFAULT_STYLE;
-  try {
-    var p = JSON.parse(stored);
-    return {
-      headerBgColor:   p.headerBgColor   || DEFAULT_STYLE.headerBgColor,
-      headerTextColor: p.headerTextColor || DEFAULT_STYLE.headerTextColor,
-      colWidths:       (p.colWidths && p.colWidths.length) ? p.colWidths : DEFAULT_STYLE.colWidths
-    };
-  } catch(e) { return DEFAULT_STYLE; }
-}
-
-function configureStyle() {
-  var ui    = DocumentApp.getUi();
-  var style = getStyle();
-
-  var fields = [
-    { key: 'headerBgColor',   label: 'Header background color', current: style.headerBgColor },
-    { key: 'headerTextColor', label: 'Header text color',        current: style.headerTextColor },
-  ];
-
-  var newStyle = {};
-  for (var i = 0; i < fields.length; i++) {
-    var f = fields[i];
-    var r = ui.prompt(f.label, 'Current: ' + f.current + '\nEnter hex color e.g. #073763', ui.ButtonSet.OK_CANCEL);
-    if (r.getSelectedButton() !== ui.Button.OK) return;
-    var val = r.getResponseText().trim();
-    newStyle[f.key] = val !== '' ? val : f.current;
-  }
-
-  var widthPrompt = ui.prompt(
-    'Column widths (points)',
-    'Comma-separated: Summary, Assignee, Last Comment\nCurrent: ' + style.colWidths.join(', ') + '\n(72 pts = 1 inch)',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (widthPrompt.getSelectedButton() !== ui.Button.OK) return;
-  var widthInput = widthPrompt.getResponseText().trim();
-  newStyle.colWidths = widthInput
-    ? widthInput.split(',').map(function(w) { return parseInt(w.trim(), 10) || 150; })
-    : style.colWidths;
-
-  PropertiesService.getUserProperties().setProperty('TABLE_STYLE', JSON.stringify(newStyle));
-  ui.alert('Style saved. Rebuild tables to apply.');
-}
-
-
 // ── OKR document builder ──────────────────────────────────────────────────────
 
 var HEADER_COLS = ['Summary', 'Assignee', 'Last Comment'];
@@ -577,18 +525,15 @@ var HEADER_COLS = ['Summary', 'Assignee', 'Last Comment'];
  * Each table row represents a KR (child ticket) of that objective.
  */
 function buildOKRTables() {
-  var props         = PropertiesService.getUserProperties();
-  var keysRaw       = props.getProperty('OBJECTIVE_KEYS') || '';
-  var objectiveKeys = keysRaw.split(',').map(function(k) { return k.trim(); })
-                             .filter(function(k) { return k.length > 0; });
+  var objectiveKeys = CONFIG.objectives;
 
-  if (objectiveKeys.length === 0) {
-    DocumentApp.getUi().alert('No objective keys configured.\nUse Jira Sync > Configure objectives.');
+  if (!objectiveKeys || objectiveKeys.length === 0) {
+    DocumentApp.getUi().alert('No objectives configured.\nEdit the objectives array in Config.gs.');
     return;
   }
 
   var doc   = DocumentApp.getActiveDocument();
-  var style = getStyle();
+  var style = CONFIG.style;
   var body  = doc.getBody();
 
   body.clear();
@@ -605,8 +550,8 @@ function buildOKRTables() {
     var cfg         = getConfig();
     var objUrl      = cfg.baseUrl + '/browse/' + objectiveKey;
     var colonIdx    = data.summary.indexOf(':');
-    var linkText    = colonIdx !== -1 ? data.summary.substring(0, colonIdx)      : data.summary;
-    var afterLink   = colonIdx !== -1 ? data.summary.substring(colonIdx)          : '';
+    var linkText    = colonIdx !== -1 ? data.summary.substring(0, colonIdx)  : data.summary;
+    var afterLink   = colonIdx !== -1 ? data.summary.substring(colonIdx)     : '';
     var headingPara = body.appendParagraph('');
     headingPara.setHeading(DocumentApp.ParagraphHeading.HEADING2);
     var ht = headingPara.editAsText();
@@ -685,37 +630,16 @@ function configureCredentials() {
   var ui    = DocumentApp.getUi();
   var props = PropertiesService.getUserProperties();
 
-  var baseUrl = ui.prompt('Jira Base URL', 'e.g. https://mycompany.atlassian.net', ui.ButtonSet.OK_CANCEL);
-  if (baseUrl.getSelectedButton() !== ui.Button.OK) return;
-
   var email = ui.prompt('Jira Email', 'Your Atlassian account email', ui.ButtonSet.OK_CANCEL);
   if (email.getSelectedButton() !== ui.Button.OK) return;
 
   var token = ui.prompt('Jira API Token', 'Paste your API token', ui.ButtonSet.OK_CANCEL);
   if (token.getSelectedButton() !== ui.Button.OK) return;
 
-  props.setProperty('JIRA_BASE_URL',  baseUrl.getResponseText().trim());
   props.setProperty('JIRA_EMAIL',     email.getResponseText().trim());
   props.setProperty('JIRA_API_TOKEN', token.getResponseText().trim());
 
   ui.alert('Credentials saved. Run "Verify API token" to confirm they work.');
-}
-
-function configureObjectives() {
-  var ui    = DocumentApp.getUi();
-  var props = PropertiesService.getUserProperties();
-  var current = props.getProperty('OBJECTIVE_KEYS') || '';
-
-  var result = ui.prompt(
-    'Configure Objective Keys',
-    'Enter Jira objective keys separated by commas (current: ' + (current || 'none') + ')\n' +
-    'e.g. INFOKR-1, INFOKR-5, INFOKR-12',
-    ui.ButtonSet.OK_CANCEL
-  );
-  if (result.getSelectedButton() !== ui.Button.OK) return;
-
-  props.setProperty('OBJECTIVE_KEYS', result.getResponseText().trim());
-  ui.alert('Saved. Run "Build OKR tables" to regenerate the document.');
 }
 
 // ── Menu ──────────────────────────────────────────────────────────────────────
@@ -723,10 +647,8 @@ function configureObjectives() {
 function onOpen() {
   DocumentApp.getUi()
     .createMenu('Jira Sync')
-    .addItem('Build OKR tables', 'buildOKRTables')
+    .addItem('Build OKR tables',      'buildOKRTables')
     .addSeparator()
-    .addItem('Configure objectives', 'configureObjectives')
     .addItem('Configure credentials', 'configureCredentials')
-    .addItem('Configure style', 'configureStyle')
     .addToUi();
 }
