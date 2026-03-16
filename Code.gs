@@ -399,6 +399,61 @@ function fetchObjectiveData(objectiveKey) {
   return { key: objectiveKey, summary: objectiveSummary, krs: fetchChildren(objectiveKey) };
 }
 
+// ── Table styling ─────────────────────────────────────────────────────────────
+
+var DEFAULT_STYLE = {
+  headerBgColor:   '#073763',  // dark blue
+  headerTextColor: '#FFFFFF',  // white
+  colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
+};
+
+function getStyle() {
+  var stored = PropertiesService.getUserProperties().getProperty('TABLE_STYLE');
+  if (!stored) return DEFAULT_STYLE;
+  try {
+    var p = JSON.parse(stored);
+    return {
+      headerBgColor:   p.headerBgColor   || DEFAULT_STYLE.headerBgColor,
+      headerTextColor: p.headerTextColor || DEFAULT_STYLE.headerTextColor,
+      colWidths:       (p.colWidths && p.colWidths.length) ? p.colWidths : DEFAULT_STYLE.colWidths
+    };
+  } catch(e) { return DEFAULT_STYLE; }
+}
+
+function configureStyle() {
+  var ui    = DocumentApp.getUi();
+  var style = getStyle();
+
+  var fields = [
+    { key: 'headerBgColor',   label: 'Header background color', current: style.headerBgColor },
+    { key: 'headerTextColor', label: 'Header text color',        current: style.headerTextColor },
+  ];
+
+  var newStyle = {};
+  for (var i = 0; i < fields.length; i++) {
+    var f = fields[i];
+    var r = ui.prompt(f.label, 'Current: ' + f.current + '\nEnter hex color e.g. #073763', ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK) return;
+    var val = r.getResponseText().trim();
+    newStyle[f.key] = val !== '' ? val : f.current;
+  }
+
+  var widthPrompt = ui.prompt(
+    'Column widths (points)',
+    'Comma-separated: Summary, Assignee, Last Comment\nCurrent: ' + style.colWidths.join(', ') + '\n(72 pts = 1 inch)',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (widthPrompt.getSelectedButton() !== ui.Button.OK) return;
+  var widthInput = widthPrompt.getResponseText().trim();
+  newStyle.colWidths = widthInput
+    ? widthInput.split(',').map(function(w) { return parseInt(w.trim(), 10) || 150; })
+    : style.colWidths;
+
+  PropertiesService.getUserProperties().setProperty('TABLE_STYLE', JSON.stringify(newStyle));
+  ui.alert('Style saved. Rebuild tables to apply.');
+}
+
+
 // ── OKR document builder ──────────────────────────────────────────────────────
 
 var HEADER_COLS = ['Summary', 'Assignee', 'Last Comment'];
@@ -418,15 +473,15 @@ function buildOKRTables() {
     return;
   }
 
-  var doc  = DocumentApp.getActiveDocument();
-  var body = doc.getBody();
+  var doc   = DocumentApp.getActiveDocument();
+  var body  = doc.getBody();
+  var style = getStyle();
   body.clear();
 
   objectiveKeys.forEach(function(objectiveKey) {
     Logger.log('Building table for ' + objectiveKey + '...');
     var data = fetchObjectiveData(objectiveKey);
 
-    // Objective heading: "INFOKR-1: Summary text"
     var headingText = objectiveKey + ': ' + data.summary;
     body.appendParagraph(headingText)
         .setHeading(DocumentApp.ParagraphHeading.HEADING2);
@@ -443,7 +498,17 @@ function buildOKRTables() {
     var headerRow = table.appendTableRow();
     HEADER_COLS.forEach(function(label) {
       var cell = headerRow.appendTableCell(label);
-      cell.editAsText().setBold(0, label.length - 1, true);
+      cell.setBackgroundColor(style.headerBgColor);
+      var t = cell.editAsText();
+      t.setBold(0, label.length - 1, true);
+      t.setForegroundColor(0, label.length - 1, style.headerTextColor);
+    });
+
+    // Set column widths
+    style.colWidths.forEach(function(width, idx) {
+      if (idx < HEADER_COLS.length) {
+        try { table.setColumnWidth(idx, width); } catch(e) {}
+      }
     });
 
     // One row per KR
@@ -464,7 +529,6 @@ function buildOKRTables() {
       writeSegmentsToCell(commentCell, getLatestComment(kr.key));
     });
 
-    // Spacer between tables
     body.appendParagraph('');
   });
 
@@ -537,6 +601,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Configure objectives', 'configureObjectives')
     .addItem('Configure credentials', 'configureCredentials')
+    .addItem('Configure style', 'configureStyle')
     .addSeparator()
     .addItem('Debug objective (INFOKR-1)', 'debugObjective')
     .addItem('Debug KR (INFOKR-7)', 'debugKR')
