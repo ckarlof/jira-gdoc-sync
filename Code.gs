@@ -588,9 +588,13 @@ function buildOKRTables() {
   }
 
   var doc   = DocumentApp.getActiveDocument();
-  var body  = doc.getBody();
   var style = getStyle();
+  var body  = doc.getBody();
+
   body.clear();
+  var tz      = Session.getScriptTimeZone();
+  var dateStr = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a '(" + tz + ")'");
+  body.appendParagraph(dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
 
   objectiveKeys.forEach(function(objectiveKey) {
     Logger.log('Building table for ' + objectiveKey + '...');
