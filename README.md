@@ -39,7 +39,7 @@ Only needed if you plan to extend the script with Docs REST API features. In the
    - **Jira Email** — your Atlassian account email
    - **Jira API Token** — generate one at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
 
-Credentials are stored in Google's **PropertiesService** (per-user, encrypted) and never committed to the repo.
+Credentials are stored in Google's **PropertiesService** (per-user, encrypted).
 
 ### 5. Configure objectives
 
@@ -75,8 +75,6 @@ Go to **Jira Sync → Configure style** to adjust:
 | File | Description |
 |---|---|
 | `Code.gs` | The entire script — copy this into Apps Script |
-| `Config.gs.example` | Template showing the credential variable format (not used by the script) |
-| `Config.gs` | Local credentials file — **gitignored, never commit** |
 
 ## Notes
 
