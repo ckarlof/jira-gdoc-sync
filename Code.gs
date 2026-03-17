@@ -496,6 +496,7 @@ function fetchChildren(objectiveKey) {
                         ? issue.fields.assignee.displayName : 'Unassigned'
       };
     }).sort(function(a, b) {
+      if (CONFIG.krSortOrder !== 'alpha') return 0;
       return a.summary.localeCompare(b.summary, undefined, { numeric: true, sensitivity: 'base' });
     });
   }

@@ -15,8 +15,13 @@ var CONFIG = {
     'INFOKR-6'
   ],
 
+  // How child KRs are ordered within each objective table.
+  // 'jira'  — keep the order Jira returns (default; typically creation order)
+  // 'alpha' — sort alphabetically by summary, numeric-aware (e.g. KR2 before KR10)
+  krSortOrder: 'alpha',
+
   style: {
-    headerBgColor:   '#073763',  // dark blue
+    headerBgColor:   '#15191d',  // dark blue
     headerTextColor: '#FFFFFF',  // white
     colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
   },
