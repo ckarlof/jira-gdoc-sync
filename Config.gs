@@ -7,18 +7,25 @@ var CONFIG = {
     baseUrl: 'https://mozilla-hub.atlassian.net'  // e.g. https://acme.atlassian.net
   },
 
-  // Jira issue keys for the objectives you want to build tables for
-  objectives: [
-    'INFOKR-1',
-    'INFOKR-3',
-    'INFOKR-5',
-    'INFOKR-6'
+  // Tables to build in the document. Each entry is one table (or group of tables).
+  // Two modes:
+  //
+  // 1. Parent/child mode — one heading + table per parent ticket; rows are child issues:
+  //      { parentKeys: ['PROJ-1', 'PROJ-2'] }
+  //    The heading is always derived from the parent ticket's own summary (e.g. "PROJ-1: My Objective").
+  //
+  // 2. Flat list mode — one table for the whole entry; rows are the listed tickets directly:
+  //      { title: 'My Table', keys: ['PROJ-10', 'PROJ-11', 'PROJ-12'] }
+  //    'title' is required in flat mode (used as the heading above the table).
+  //
+  tables: [
+    { parentKeys: ['INFOKR-1', 'INFOKR-3', 'INFOKR-5', 'INFOKR-6'] }
   ],
 
-  // How child KRs are ordered within each objective table.
+  // How issues are ordered within each table.
   // 'jira'  — keep the order Jira returns (default; typically creation order)
   // 'alpha' — sort alphabetically by summary, numeric-aware (e.g. KR2 before KR10)
-  krSortOrder: 'alpha',
+  sortOrder: 'alpha',
 
   style: {
     headerBgColor:   '#15191d',  // dark blue

@@ -480,10 +480,10 @@ function getParentLinkFieldId() {
 /**
  * Returns the Jira field names to request for the configured columns.
  * 'latestComment' is fetched separately; all others map directly to Jira field names.
- * 'summary' is always included (needed for headings, sort, and attention items).
+ * 'summary' and 'assignee' are always included.
  */
 function jiraFieldsForColumns() {
-  var fields = { summary: true, assignee: true };  // always fetch these two
+  var fields = { summary: true, assignee: true };
   (CONFIG.columns || []).forEach(function(col) {
     if (col.field && col.field !== 'latestComment') fields[col.field] = true;
   });
@@ -503,16 +503,41 @@ function extractFieldText(fieldValue) {
 }
 
 /**
- * Fetches child issues of an objective. Tries multiple JQL strategies,
- * including querying by numeric issue ID which works when key-based queries fail.
+ * Maps a raw Jira issue object to the standard issue record used throughout the script.
  */
-function fetchChildren(objectiveKey) {
-  var cfg    = getConfig();
+function mapIssue(issue) {
+  var cfg = getConfig();
+  var f   = issue.fields || {};
+  return {
+    key:          issue.key,
+    summary:      f.summary || '(no summary)',
+    url:          cfg.baseUrl + '/browse/' + issue.key,
+    assigneeName: f.assignee ? f.assignee.displayName : 'Unassigned',
+    fields:       f
+  };
+}
+
+/**
+ * Sorts an array of issue records according to CONFIG.sortOrder.
+ * Mutates and returns the array.
+ */
+function sortIssues(issues) {
+  if (CONFIG.sortOrder !== 'alpha') return issues;
+  return issues.sort(function(a, b) {
+    return a.summary.localeCompare(b.summary, undefined, { numeric: true, sensitivity: 'base' });
+  });
+}
+
+/**
+ * Fetches child issues of a parent key. Tries multiple JQL strategies.
+ * Returns a sorted array of issue records.
+ */
+function fetchChildIssues(parentKey) {
   var fields = jiraFieldsForColumns();
 
   var strategies = [
-    'parent = ' + objectiveKey + ' ORDER BY created ASC',
-    'issuekey in childIssuesOf("' + objectiveKey + '") ORDER BY created ASC',
+    'parent = ' + parentKey + ' ORDER BY created ASC',
+    'issuekey in childIssuesOf("' + parentKey + '") ORDER BY created ASC',
   ];
 
   for (var i = 0; i < strategies.length; i++) {
@@ -523,38 +548,43 @@ function fetchChildren(objectiveKey) {
     var data = JSON.parse(result.body);
     if (!data.issues || data.issues.length === 0) continue;
 
-    Logger.log(objectiveKey + ': found ' + data.issues.length + ' KR(s) via [' + strategies[i] + ']');
-    return data.issues.map(function(issue) {
-      var f = issue.fields || {};
-      return {
-        key:          issue.key,
-        summary:      f.summary || '(no summary)',
-        url:          cfg.baseUrl + '/browse/' + issue.key,
-        assigneeName: f.assignee ? f.assignee.displayName : 'Unassigned',
-        fields:       f   // full fields bag for generic column rendering
-      };
-    }).sort(function(a, b) {
-      if (CONFIG.krSortOrder !== 'alpha') return 0;
-      return a.summary.localeCompare(b.summary, undefined, { numeric: true, sensitivity: 'base' });
-    });
+    Logger.log(parentKey + ': found ' + data.issues.length + ' child issue(s) via [' + strategies[i] + ']');
+    return sortIssues(data.issues.map(mapIssue));
   }
 
-  Logger.log(objectiveKey + ': no KRs found with any strategy');
+  Logger.log(parentKey + ': no child issues found with any strategy');
   return [];
 }
 
 /**
- * Fetches an objective's summary and its child KRs from Jira.
+ * Fetches a parent ticket's summary and its child issues.
+ * Returns { key, summary, issues }.
  */
-function fetchObjectiveData(objectiveKey) {
-  var objResult        = jiraGet('/rest/api/3/issue/' + objectiveKey + '?fields=summary');
-  var objectiveSummary = objectiveKey;
-  if (objResult.code === 200) {
-    var objData      = JSON.parse(objResult.body);
-    objectiveSummary = (objData.fields && objData.fields.summary) || objectiveKey;
+function fetchParentData(parentKey) {
+  var result  = jiraGet('/rest/api/3/issue/' + parentKey + '?fields=summary');
+  var summary = parentKey;
+  if (result.code === 200) {
+    var data = JSON.parse(result.body);
+    summary  = (data.fields && data.fields.summary) || parentKey;
   }
+  return { key: parentKey, summary: summary, issues: fetchChildIssues(parentKey) };
+}
 
-  return { key: objectiveKey, summary: objectiveSummary, krs: fetchChildren(objectiveKey) };
+/**
+ * Fetches a specific list of issue keys directly (flat mode).
+ * Returns an array of issue records in the order specified (then sorted if configured).
+ */
+function fetchFlatIssues(keys) {
+  if (!keys || keys.length === 0) return [];
+  var fields = jiraFieldsForColumns();
+  var jql    = 'issuekey in (' + keys.join(',') + ')';
+  var result = jiraSearch(jql, fields, keys.length + 10);
+  if (result.code !== 200) {
+    Logger.log('fetchFlatIssues failed: HTTP ' + result.code);
+    return [];
+  }
+  var data = JSON.parse(result.body);
+  return sortIssues((data.issues || []).map(mapIssue));
 }
 
 // ── OKR document builder ──────────────────────────────────────────────────────
@@ -596,16 +626,52 @@ function renderCell(cell, col, kr, commentCache) {
 }
 
 /**
- * Clears the document and builds one table per objective.
- * Each table row represents a KR (child ticket) of that objective.
+ * Appends a styled table of issues to the document body.
  */
-function buildOKRTables() {
-  var objectiveKeys = CONFIG.objectives;
+function appendIssueTable(body, issues, columns, style, commentCache) {
+  var table     = body.appendTable();
+  var headerRow = table.appendTableRow();
 
-  if (!objectiveKeys || objectiveKeys.length === 0) {
-    DocumentApp.getUi().alert('No objectives configured.\nEdit the objectives array in Config.gs.');
+  columns.forEach(function(col) {
+    var cell = headerRow.appendTableCell(col.heading);
+    cell.setBackgroundColor(style.headerBgColor);
+    var t = cell.editAsText();
+    t.setBold(0, col.heading.length - 1, true);
+    t.setForegroundColor(0, col.heading.length - 1, style.headerTextColor);
+  });
+
+  columns.forEach(function(col, idx) {
+    if (col.width) try { table.setColumnWidth(idx, col.width); } catch(e) {}
+  });
+
+  issues.forEach(function(issue) {
+    var row = table.appendTableRow();
+    columns.forEach(function(col) {
+      renderCell(row.appendTableCell(''), col, issue, commentCache);
+    });
+  });
+}
+
+/**
+ * Clears the document and builds tables according to CONFIG.tables.
+ *
+ * Two table entry modes:
+ *   { parentKeys: [...], title? } — one heading + table per parent; rows are child issues
+ *   { keys: [...],       title  } — one heading + flat table; rows are the listed issues
+ */
+function buildTables() {
+  var tableConfigs = CONFIG.tables;
+
+  if (!tableConfigs || tableConfigs.length === 0) {
+    DocumentApp.getUi().alert('No tables configured.\nEdit the tables array in Config.gs.');
     return;
   }
+
+  var columns = CONFIG.columns || [
+    { heading: 'Summary',      width: 175, field: 'summary'       },
+    { heading: 'Assignee',     width: 75,  field: 'assignee'      },
+    { heading: 'Last Comment', width: 600, field: 'latestComment' },
+  ];
 
   var doc   = DocumentApp.getActiveDocument();
   var style = CONFIG.style;
@@ -616,81 +682,74 @@ function buildOKRTables() {
   var dateStr = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a '(" + tz + ")'");
   body.appendParagraph(dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
 
-  // Fetch all objective data up front so we can pass it to the AI summarizer
-  var allObjectiveData = objectiveKeys.map(function(key) {
-    Logger.log('Fetching data for ' + key + '...');
-    return fetchObjectiveData(key);
+  // ── Fetch all data up front ──────────────────────────────────────────────────
+  // Normalise each table config into a list of { heading, issues } sections.
+  var allSections = [];  // [{ heading: str|null, issues: [...] }]
+
+  tableConfigs.forEach(function(tbl) {
+    if (tbl.parentKeys && tbl.parentKeys.length > 0) {
+      // Parent/child mode — one section per parent key
+      tbl.parentKeys.forEach(function(parentKey) {
+        Logger.log('Fetching children of ' + parentKey + '...');
+        var parentData = fetchParentData(parentKey);
+        var heading = parentData.key + ': ' + parentData.summary;
+        allSections.push({ heading: heading, headingKey: parentKey, issues: parentData.issues });
+      });
+    } else if (tbl.keys && tbl.keys.length > 0) {
+      // Flat list mode — one section for the whole entry
+      Logger.log('Fetching flat list: ' + tbl.keys.join(', '));
+      var issues = fetchFlatIssues(tbl.keys);
+      allSections.push({ heading: tbl.title || null, headingKey: null, issues: issues });
+    }
   });
 
-  // Build comment cache once — used by both the AI digest and attention items
-  var commentCache   = buildCommentCache(allObjectiveData);
-  var attentionItems = buildAttentionItems(allObjectiveData, commentCache);
+  // ── Comment cache + AI/attention summary ─────────────────────────────────────
+  // Build a unified issue list for the cache (mimics the old allObjectiveData shape)
+  var allIssueGroups = allSections.map(function(s) {
+    return { summary: s.heading || '', krs: s.issues };
+  });
 
-  // AI summary — runs before the tables so it appears at the top
+  var commentCache   = buildCommentCache(allIssueGroups);
+  var attentionItems = buildAttentionItems(allIssueGroups, commentCache);
+
   if (CONFIG.aiSummary && CONFIG.aiSummary.enabled) {
-    var digest      = buildCommentDigest(allObjectiveData, commentCache);
+    var digest      = buildCommentDigest(allIssueGroups, commentCache);
     var summaryText = generateAiSummary(digest);
-    if (summaryText) writeSummaryToDoc(body, summaryText, attentionItems);
+    writeSummaryToDoc(body, summaryText || '', attentionItems);
   } else if (attentionItems.length > 0) {
-    // Still write the attention section even when AI summary is disabled
     writeSummaryToDoc(body, '', attentionItems);
   }
 
-  allObjectiveData.forEach(function(data) {
-    var objectiveKey = data.key;
-    Logger.log('Building table for ' + objectiveKey + '...');
+  // ── Render sections ───────────────────────────────────────────────────────────
+  var cfg        = getConfig();
+  var tableCount = 0;
 
-    // Heading: "KEY: Summary text" with only the Jira key hyperlinked.
-    var cfg         = getConfig();
-    var objUrl      = cfg.baseUrl + '/browse/' + objectiveKey;
-    var headingText = objectiveKey + ': ' + data.summary;
-    var headingPara = body.appendParagraph('');
-    headingPara.setHeading(DocumentApp.ParagraphHeading.HEADING2);
-    var ht = headingPara.editAsText();
-    ht.setText(headingText);
-    ht.setLinkUrl(0, objectiveKey.length - 1, objUrl);
+  allSections.forEach(function(section) {
+    // Heading
+    if (section.heading) {
+      var headingPara = body.appendParagraph('');
+      headingPara.setHeading(DocumentApp.ParagraphHeading.HEADING2);
+      var ht = headingPara.editAsText();
+      ht.setText(section.heading);
+      // Hyperlink just the key portion when we have one
+      if (section.headingKey) {
+        var url = cfg.baseUrl + '/browse/' + section.headingKey;
+        ht.setLinkUrl(0, section.headingKey.length - 1, url);
+      }
+    }
 
-    if (data.krs.length === 0) {
-      body.appendParagraph('(no KRs found)').setItalic(true);
+    if (section.issues.length === 0) {
+      body.appendParagraph('(no issues found)').setItalic(true);
       body.appendParagraph('');
       return;
     }
 
-    var columns = CONFIG.columns || [
-      { heading: 'Summary',      width: 175, field: 'summary'       },
-      { heading: 'Assignee',     width: 75,  field: 'assignee'      },
-      { heading: 'Last Comment', width: 600, field: 'latestComment' },
-    ];
-
-    var table = body.appendTable();
-
-    // Header row
-    var headerRow = table.appendTableRow();
-    columns.forEach(function(col) {
-      var cell = headerRow.appendTableCell(col.heading);
-      cell.setBackgroundColor(style.headerBgColor);
-      var t = cell.editAsText();
-      t.setBold(0, col.heading.length - 1, true);
-      t.setForegroundColor(0, col.heading.length - 1, style.headerTextColor);
-    });
-
-    // Set column widths
-    columns.forEach(function(col, idx) {
-      if (col.width) try { table.setColumnWidth(idx, col.width); } catch(e) {}
-    });
-
-    // One row per KR
-    data.krs.forEach(function(kr) {
-      var row = table.appendTableRow();
-      columns.forEach(function(col) {
-        renderCell(row.appendTableCell(''), col, kr, commentCache);
-      });
-    });
-
+    appendIssueTable(body, section.issues, columns, style, commentCache);
     body.appendParagraph('');
+    tableCount++;
   });
 
-  DocumentApp.getUi().alert('Done. Built tables for ' + objectiveKeys.length + ' objective(s).');
+  DocumentApp.getUi().alert('Done. Built ' + tableCount + ' table(s).');
 }
 
 // ── Verification ──────────────────────────────────────────────────────────────
@@ -754,11 +813,14 @@ function generateAiSummary(commentText) {
   }
 
   var data = JSON.parse(response.getContentText());
-  return (data.content && data.content[0] && data.content[0].text) || null;
+  var text = (data.content && data.content[0] && data.content[0].text) || null;
+  if (!text) Logger.log('Claude API returned no text. Response: ' + response.getContentText());
+  else Logger.log('Claude API success (' + text.length + ' chars)');
+  return text;
 }
 
 /**
- * Fetches comment metadata for every KR across all objectives exactly once.
+ * Fetches comment metadata for every issue across all groups exactly once.
  * Returns a plain object keyed by ticket key: { blocks, date }
  */
 function buildCommentCache(objectiveDataList) {
@@ -960,7 +1022,7 @@ function configureClaudeKey() {
 function onOpen() {
   DocumentApp.getUi()
     .createMenu('Jira Sync')
-    .addItem('Build OKR tables',        'buildOKRTables')
+    .addItem('Build tables',                 'buildTables')
     .addSeparator()
     .addItem('Configure Jira credentials',   'configureCredentials')
     .addItem('Configure Claude API key',     'configureClaudeKey')
