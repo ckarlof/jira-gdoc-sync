@@ -709,22 +709,77 @@ function buildCommentDigest(objectiveDataList) {
 }
 
 /**
- * Writes the AI summary text into the document body as a styled section
- * immediately after the timestamp heading.
+ * Parses a string that may contain **bold** spans into a segments array:
+ *   [{ text: string, bold: boolean }, ...]
+ */
+function parseBoldSegments(text) {
+  var segments = [];
+  var re = /\*\*(.+?)\*\*/g;
+  var last = 0, match;
+  while ((match = re.exec(text)) !== null) {
+    if (match.index > last) segments.push({ text: text.substring(last, match.index), bold: false });
+    segments.push({ text: match[1], bold: true });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) segments.push({ text: text.substring(last), bold: false });
+  return segments;
+}
+
+/**
+ * Applies a segments array (with bold flags) to a Text object.
+ */
+function applyBoldSegments(t, segments) {
+  var full = segments.map(function(s) { return s.text; }).join('');
+  t.setText(full);
+  var pos = 0;
+  segments.forEach(function(s) {
+    if (s.text.length && s.bold) t.setBold(pos, pos + s.text.length - 1, true);
+    pos += s.text.length;
+  });
+}
+
+/**
+ * Writes the AI summary into the document body using native Google Docs formatting.
+ *
+ * Expected Claude output format:
+ *   SECTION: <title>
+ *   ITEM: <text with optional **bold**>
+ *
+ * SECTION lines → HEADING3. ITEM lines → native bullet list items with bold preserved.
+ * Stray leading markdown chars (#, -, •) are stripped; **bold** spans are rendered natively.
  */
 function writeSummaryToDoc(body, summaryText) {
   body.appendParagraph('AI Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
-  summaryText.split('\n').forEach(function(line) {
-    line = line.trim();
+
+  var firstListItem = null;
+
+  summaryText.split('\n').forEach(function(raw) {
+    var line = raw.trim();
     if (!line) return;
-    // Bullet lines from Claude often start with • or -
-    if (line.charAt(0) === '•' || line.charAt(0) === '-') {
-      body.appendListItem(line.substring(1).trim())
-          .setGlyphType(DocumentApp.GlyphType.BULLET);
+
+    // Strip stray leading markdown chars that aren't part of SECTION/ITEM structure
+    line = line.replace(/^#+\s*/, '').replace(/^[-•]\s*/, '');
+
+    if (line.indexOf('SECTION:') === 0) {
+      var title = line.substring('SECTION:'.length).trim();
+      body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING3);
+      firstListItem = null;  // each section starts a fresh list
+    } else if (line.indexOf('ITEM:') === 0) {
+      var itemText = line.substring('ITEM:'.length).trim();
+      var item = body.appendListItem('').setGlyphType(DocumentApp.GlyphType.BULLET);
+      if (firstListItem) {
+        item.setListId(firstListItem);
+      } else {
+        firstListItem = item;
+      }
+      applyBoldSegments(item.editAsText(), parseBoldSegments(itemText));
     } else {
+      // Unexpected line — render as plain paragraph and reset list anchor
+      firstListItem = null;
       body.appendParagraph(line);
     }
   });
+
   body.appendParagraph('');
 }
 

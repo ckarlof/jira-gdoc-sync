@@ -35,9 +35,22 @@ var CONFIG = {
     model: 'claude-opus-4-6',
 
     // Prompt sent to Claude. The full text of all KR comments is appended after this.
+    // The format contract (SECTION:/ITEM:) must be preserved if you edit this prompt —
+    // writeSummaryToDoc() parses it to produce native Google Docs formatting.
     prompt: 'You are summarizing OKR progress updates for a leadership audience. ' +
-            'Given the latest Jira comments across all key results below, write a concise ' +
-            'executive summary (3-5 bullet points) highlighting the most important progress, ' +
-            'blockers, and risks. Be specific and avoid filler language.\n\n'
+            'Given the latest Jira comments across all key results below, produce a structured ' +
+            'summary with exactly two sections. Use this exact format:\n\n' +
+            'SECTION: Progress & Wins\n' +
+            'ITEM: <concise highlight>\n' +
+            'ITEM: <concise highlight>\n\n' +
+            'SECTION: Risks & Blockers\n' +
+            'ITEM: <concise highlight>\n' +
+            'ITEM: <concise highlight>\n\n' +
+            'Rules:\n' +
+            '- Every line must start with SECTION: or ITEM: — no other line types\n' +
+            '- No markdown headings (#), bullet chars (-, •), or leading asterisks\n' +
+            '- You may use **bold** within ITEM text to emphasize key terms\n' +
+            '- Include 2-4 ITEMs per section. Be specific. Omit filler language.\n' +
+            '- If a section has nothing to report, write one ITEM: Nothing to report.\n\n'
   }
 };
