@@ -579,18 +579,15 @@ function buildOKRTables() {
     var objectiveKey = data.key;
     Logger.log('Building table for ' + objectiveKey + '...');
 
-    // Heading: link the short name (text before first ':') to the Jira issue;
-    // drop the key prefix entirely.
+    // Heading: "KEY: Summary text" with only the Jira key hyperlinked.
     var cfg         = getConfig();
     var objUrl      = cfg.baseUrl + '/browse/' + objectiveKey;
-    var colonIdx    = data.summary.indexOf(':');
-    var linkText    = colonIdx !== -1 ? data.summary.substring(0, colonIdx)  : data.summary;
-    var afterLink   = colonIdx !== -1 ? data.summary.substring(colonIdx)     : '';
+    var headingText = objectiveKey + ': ' + data.summary;
     var headingPara = body.appendParagraph('');
     headingPara.setHeading(DocumentApp.ParagraphHeading.HEADING2);
     var ht = headingPara.editAsText();
-    ht.setText(linkText + afterLink);
-    ht.setLinkUrl(0, linkText.length - 1, objUrl);
+    ht.setText(headingText);
+    ht.setLinkUrl(0, objectiveKey.length - 1, objUrl);
 
     if (data.krs.length === 0) {
       body.appendParagraph('(no KRs found)').setItalic(true);
