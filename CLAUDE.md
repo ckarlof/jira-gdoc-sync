@@ -7,18 +7,29 @@ A two-file Google Apps Script that syncs Jira OKR data into a Google Doc:
 - **`Code.gs`** — all logic
 - **`Config.gs`** — all non-credential configuration (Jira base URL, objectives, style, AI settings)
 
-There is no build step, no package manager, and no local execution. All code runs inside the Apps Script runtime attached to a specific Google Doc.
+The Apps Script files run inside the Apps Script runtime attached to a specific Google Doc. A Jest test suite covers the pure logic locally.
 
 ## How to test changes
 
-There is no local test runner. To test:
+### Unit tests (local — run these first)
+
+```bash
+npm test          # run all tests once
+npm run test:watch  # re-run on file save
+```
+
+Tests live in `tests/`. They load `Code.gs` into a Node VM with all Apps Script globals stubbed out, so no Google account or internet connection is needed.
+
+**What is tested:** `adfToBlocks`, `autoLinkSegments`, `buildCommentDigest`
+
+**What is not tested:** anything that calls `UrlFetchApp`, `DocumentApp`, `PropertiesService`, or `DriveApp` — those require the live Apps Script runtime.
+
+### Manual testing (Apps Script runtime)
 
 1. Open the bound Google Doc → **Extensions → Apps Script**
 2. Paste updated file(s) into the editor
 3. Run functions directly from the Apps Script editor or via the **Jira Sync** menu in the doc
 4. Check output in **View → Logs** (or `Logger.log` output)
-
-Never suggest running `node`, `npm`, or any local tooling — it will not work.
 
 ## Architecture
 
@@ -91,5 +102,6 @@ Never hardcode credentials. Never write them to a file.
 ## Style conventions
 
 - ES5-compatible JavaScript (`var`, `function` declarations) — stay consistent with existing code
-- No external dependencies
-- Logic stays in `Code.gs`; configuration stays in `Config.gs`; no other files
+- No external dependencies in `Code.gs` or `Config.gs`
+- Logic stays in `Code.gs`; configuration stays in `Config.gs`; tests in `tests/`
+- `package.json` and `node_modules/` are for local testing only — they are not deployed to Apps Script

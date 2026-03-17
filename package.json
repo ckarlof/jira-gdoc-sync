@@ -1,0 +1,11 @@
+{
+  "name": "jira-gdoc-sync",
+  "private": true,
+  "scripts": {
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0"
+  }
+}
