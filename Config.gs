@@ -9,7 +9,10 @@ var CONFIG = {
 
   // Jira issue keys for the objectives you want to build tables for
   objectives: [
-    'INFOKR-1'
+    'INFOKR-1',
+    'INFOKR-3',
+    'INFOKR-5',
+    'INFOKR-6'
   ],
 
   style: {
@@ -21,7 +24,7 @@ var CONFIG = {
   // AI summary section — set enabled: true and configure your Claude API key via
   // Jira Sync > Configure credentials to use this feature.
   aiSummary: {
-    enabled: false,
+    enabled: true,
 
     // Claude model to use for summarization
     model: 'claude-opus-4-6',

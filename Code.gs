@@ -495,6 +495,8 @@ function fetchChildren(objectiveKey) {
         assigneeName: (issue.fields && issue.fields.assignee)
                         ? issue.fields.assignee.displayName : 'Unassigned'
       };
+    }).sort(function(a, b) {
+      return a.summary.localeCompare(b.summary, undefined, { numeric: true, sensitivity: 'base' });
     });
   }
 
