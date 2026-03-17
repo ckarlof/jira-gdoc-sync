@@ -3,6 +3,8 @@
 const { loadPureFunctions } = require('./appsScriptSandbox');
 const { autoLinkSegments } = loadPureFunctions();
 
+const BASE = 'https://example.atlassian.net';
+
 function seg(text, extra) {
   return Object.assign({
     text, bold: false, italic: false, underline: false,
@@ -76,5 +78,71 @@ describe('autoLinkSegments', () => {
   test('segment with empty text is passed through', () => {
     const input = [seg('')];
     expect(autoLinkSegments(input)).toEqual(input);
+  });
+});
+
+// ── Jira ticket key auto-linking ──────────────────────────────────────────────
+
+describe('autoLinkSegments — Jira ticket keys', () => {
+  test('bare ticket key becomes a Jira browse link', () => {
+    const result = autoLinkSegments([seg('see PROJ-123 for details')], BASE);
+    expect(result).toHaveLength(3);
+    expect(result[1].text).toBe('PROJ-123');
+    expect(result[1].url).toBe(BASE + '/browse/PROJ-123');
+  });
+
+  test('ticket key at start of text', () => {
+    const result = autoLinkSegments([seg('PROJ-1 is the goal')], BASE);
+    expect(result[0].text).toBe('PROJ-1');
+    expect(result[0].url).toBe(BASE + '/browse/PROJ-1');
+  });
+
+  test('ticket key at end of text', () => {
+    const result = autoLinkSegments([seg('tracked in PROJ-99')], BASE);
+    const last = result[result.length - 1];
+    expect(last.text).toBe('PROJ-99');
+    expect(last.url).toBe(BASE + '/browse/PROJ-99');
+  });
+
+  test('multi-part project key (e.g. INFOKR-42)', () => {
+    const result = autoLinkSegments([seg('see INFOKR-42')], BASE);
+    const linked = result.find(s => s.url);
+    expect(linked.text).toBe('INFOKR-42');
+    expect(linked.url).toBe(BASE + '/browse/INFOKR-42');
+  });
+
+  test('multiple ticket keys in one segment', () => {
+    const result = autoLinkSegments([seg('PROJ-1 and PROJ-2 are related')], BASE);
+    const linked = result.filter(s => s.url);
+    expect(linked).toHaveLength(2);
+    expect(linked[0].url).toBe(BASE + '/browse/PROJ-1');
+    expect(linked[1].url).toBe(BASE + '/browse/PROJ-2');
+  });
+
+  test('ticket key and URL in same segment', () => {
+    const result = autoLinkSegments([seg('PROJ-1 see https://example.com')], BASE);
+    const linked = result.filter(s => s.url);
+    expect(linked).toHaveLength(2);
+    expect(linked[0].url).toBe(BASE + '/browse/PROJ-1');
+    expect(linked[1].url).toBe('https://example.com');
+  });
+
+  test('lowercase key is not matched', () => {
+    const result = autoLinkSegments([seg('proj-123 is lowercase')], BASE);
+    expect(result).toHaveLength(1);
+    expect(result[0].url).toBeNull();
+  });
+
+  test('key already inside a URL is not double-linked', () => {
+    const input = [seg('https://example.atlassian.net/browse/PROJ-1')];
+    const result = autoLinkSegments(input, BASE);
+    expect(result).toHaveLength(1);
+    expect(result[0].url).toBe('https://example.atlassian.net/browse/PROJ-1');
+  });
+
+  test('preserves formatting on split segments', () => {
+    const input = [seg('bold PROJ-1 text', { bold: true })];
+    const result = autoLinkSegments(input, BASE);
+    result.forEach(s => expect(s.bold).toBe(true));
   });
 });

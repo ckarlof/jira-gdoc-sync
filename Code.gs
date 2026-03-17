@@ -219,22 +219,31 @@ function adfToBlocks(adfBody) {
 }
 
 /**
- * Scans unlinked text segments for bare http(s) URLs and splits them into
- * linked segments, leaving surrounding text and already-linked segments alone.
+ * Scans unlinked text segments for bare http(s) URLs and bare Jira ticket keys
+ * (e.g. PROJ-123) and splits them into linked segments, leaving surrounding text
+ * and already-linked segments alone.
+ *
+ * Accepts an optional baseUrl override (used in tests); falls back to CONFIG.
  */
-function autoLinkSegments(segments) {
-  var URL_RE = /https?:\/\/[^\s<>'"]+/g;
+function autoLinkSegments(segments, baseUrl) {
+  var jiraBase = baseUrl || (CONFIG && CONFIG.jira && CONFIG.jira.baseUrl) || '';
+  // Matches bare URLs first, then bare Jira keys (e.g. PROJ-123, INFOKR-42).
+  // Lookbehind/ahead prevent matching keys that are already part of a longer word.
+  var LINK_RE = /https?:\/\/[^\s<>'"]+|(?<![A-Za-z0-9])([A-Z][A-Z0-9]+-\d+)(?![A-Za-z0-9])/g;
   var result = [];
   segments.forEach(function(s) {
     if (s.url || !s.text) { result.push(s); return; }
-    URL_RE.lastIndex = 0;
+    LINK_RE.lastIndex = 0;
     var text = s.text, lastIndex = 0, found = false, match;
-    while ((match = URL_RE.exec(text)) !== null) {
+    while ((match = LINK_RE.exec(text)) !== null) {
       found = true;
       if (match.index > lastIndex)
         result.push(Object.assign({}, s, { text: text.substring(lastIndex, match.index) }));
-      result.push(Object.assign({}, s, { text: match[0], url: match[0] }));
-      lastIndex = match.index + match[0].length;
+      var matchText = match[0];
+      // match[1] is set for Jira key captures; otherwise it's a bare URL
+      var url = match[1] ? (jiraBase + '/browse/' + match[1]) : matchText;
+      result.push(Object.assign({}, s, { text: matchText, url: url }));
+      lastIndex = match.index + matchText.length;
     }
     if (!found) { result.push(s); return; }
     if (lastIndex < text.length)
