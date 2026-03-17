@@ -12,7 +12,9 @@ For each configured objective, the script writes:
   - **Assignee** — display name
   - **Last Comment** — most recent comment with full rich-text formatting: bold, italic, status lozenges, bullet/numbered lists with nesting, and auto-linked URLs
 
-The document is stamped with the run timestamp (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`) at the top.
+If AI summary is enabled, an executive summary of all KR comments appears between the timestamp and the tables.
+
+The document is stamped with the run timestamp (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`) at the top of each run.
 
 ## Setup
 
@@ -20,55 +22,81 @@ The document is stamped with the run timestamp (e.g. `Mar 15, 2026 2:34 PM (Amer
 
 Open or create the Google Doc where you want the OKR tables to appear.
 
-### 2. Add the script
+### 2. Add the script files
 
 1. In the doc, go to **Extensions → Apps Script**
-2. Delete any existing code in `Code.gs`
-3. Paste the contents of `Code.gs` from this repo
-4. Click **Save**
+2. Replace the contents of `Code.gs` with the contents of `Code.gs` from this repo
+3. Create a second file called `Config.gs` and paste in the contents of `Config.gs` from this repo
+4. Edit `Config.gs` to set your Jira base URL and objective keys (see [Configuration](#configuration))
+5. Click **Save**
 
-### 3. Enable the Google Docs API advanced service (optional)
-
-Only needed if you plan to extend the script with Docs REST API features. In the Apps Script editor: **Services (+) → Google Docs API → Add**.
-
-### 4. Configure credentials
+### 3. Configure credentials
 
 1. Reload the Google Doc — a **Jira Sync** menu will appear
-2. Go to **Jira Sync → Configure credentials** and enter:
-   - **Jira Base URL** — e.g. `https://your-domain.atlassian.net`
+2. Go to **Jira Sync → Configure Jira credentials** and enter:
    - **Jira Email** — your Atlassian account email
    - **Jira API Token** — generate one at [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
 
-Credentials are stored in Google's **PropertiesService** (per-user, encrypted).
+Credentials are stored in Google's **PropertiesService** (per-user, encrypted at rest). They are never stored in the script files.
 
-### 5. Configure objectives
-
-Go to **Jira Sync → Configure objectives** and enter a comma-separated list of objective Jira keys, e.g.:
-
-```
-INFOKR-1, INFOKR-5, INFOKR-12
-```
-
-### 6. Run
+### 4. Run
 
 Go to **Jira Sync → Build OKR tables**. The document will be populated with the current OKR status.
+
+## Configuration
+
+All non-credential settings live in `Config.gs`:
+
+```javascript
+var CONFIG = {
+  jira: {
+    baseUrl: 'https://your-domain.atlassian.net'
+  },
+
+  // Jira issue keys for the objectives to sync
+  objectives: [
+    'PROJ-1',
+    'PROJ-2'
+  ],
+
+  // KR sort order within each objective table
+  // 'jira'  — keep the order Jira returns (default; typically creation order)
+  // 'alpha' — sort alphabetically by summary, numeric-aware (KR2 before KR10)
+  krSortOrder: 'jira',
+
+  style: {
+    headerBgColor:   '#073763',  // header background
+    headerTextColor: '#FFFFFF',  // header text
+    colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
+  },
+
+  aiSummary: {
+    enabled: false,
+    model:   'claude-opus-4-6',
+    prompt:  '...'
+  }
+};
+```
 
 ## Menu reference
 
 | Menu item | Description |
 |---|---|
 | Build OKR tables | Fetches data from Jira and rebuilds the document |
-| Configure objectives | Set the Jira keys for the objectives to sync |
-| Configure credentials | Set Jira URL, email, and API token |
-| Configure style | Set header background/text colors and column widths |
+| Configure Jira credentials | Set Jira email and API token |
+| Configure Claude API key | Set Anthropic API key for AI summaries |
 
-## Styling
+## AI summary (optional)
 
-Go to **Jira Sync → Configure style** to adjust:
+The script can generate an executive summary of all KR comments using the Claude API, inserted at the top of the output before the tables.
 
-- **Header background color** — default `#073763` (dark blue)
-- **Header text color** — default `#FFFFFF` (white)
-- **Column widths** — in points (72 pt = 1 inch); default `175, 75, 600`
+To enable:
+
+1. Set `aiSummary.enabled: true` in `Config.gs` and customize the `prompt` if desired
+2. Go to **Jira Sync → Configure Claude API key** and paste your Anthropic API key
+3. Run **Build OKR tables** — the summary will appear below the timestamp heading
+
+The API key is stored in PropertiesService alongside Jira credentials. Review your organization's AI usage policies before enabling this feature with work data.
 
 ## Best practices
 
@@ -86,7 +114,8 @@ Repeat for each sync cycle. Each tab becomes an archived, dated snapshot.
 
 | File | Description |
 |---|---|
-| `Code.gs` | The entire script — copy this into Apps Script |
+| `Code.gs` | All script logic — paste into Apps Script |
+| `Config.gs` | All non-credential configuration — paste into Apps Script and edit |
 
 ## Notes
 
