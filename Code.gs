@@ -541,9 +541,22 @@ function buildOKRTables() {
   var dateStr = Utilities.formatDate(new Date(), tz, "MMM d, yyyy h:mm a '(" + tz + ")'");
   body.appendParagraph(dateStr).setHeading(DocumentApp.ParagraphHeading.HEADING1);
 
-  objectiveKeys.forEach(function(objectiveKey) {
+  // Fetch all objective data up front so we can pass it to the AI summarizer
+  var allObjectiveData = objectiveKeys.map(function(key) {
+    Logger.log('Fetching data for ' + key + '...');
+    return fetchObjectiveData(key);
+  });
+
+  // AI summary — runs before the tables so it appears at the top
+  if (CONFIG.aiSummary && CONFIG.aiSummary.enabled) {
+    var digest      = buildCommentDigest(allObjectiveData);
+    var summaryText = generateAiSummary(digest);
+    if (summaryText) writeSummaryToDoc(body, summaryText);
+  }
+
+  allObjectiveData.forEach(function(data) {
+    var objectiveKey = data.key;
     Logger.log('Building table for ' + objectiveKey + '...');
-    var data = fetchObjectiveData(objectiveKey);
 
     // Heading: link the short name (text before first ':') to the Jira issue;
     // drop the key prefix entirely.
@@ -624,6 +637,94 @@ function verifyJiraToken() {
   }
 }
 
+// ── AI summary ────────────────────────────────────────────────────────────────
+
+/**
+ * Calls the Claude API with the collected KR comment text and returns a summary string.
+ * Returns null (with a logged error) if the call fails or the feature is disabled.
+ */
+function generateAiSummary(commentText) {
+  var ai = CONFIG.aiSummary;
+  if (!ai || !ai.enabled) return null;
+
+  var props     = PropertiesService.getUserProperties();
+  var claudeKey = props.getProperty('CLAUDE_API_KEY');
+  if (!claudeKey) {
+    Logger.log('AI summary skipped: CLAUDE_API_KEY not set. Use Jira Sync > Configure credentials.');
+    return null;
+  }
+
+  var model  = ai.model  || 'claude-opus-4-6';
+  var prompt = ai.prompt || '';
+
+  var payload = JSON.stringify({
+    model:      model,
+    max_tokens: 1024,
+    messages:   [{ role: 'user', content: prompt + commentText }]
+  });
+
+  var response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method:  'POST',
+    headers: {
+      'x-api-key':         claudeKey,
+      'anthropic-version': '2023-06-01',
+      'content-type':      'application/json'
+    },
+    payload:            payload,
+    muteHttpExceptions: true
+  });
+
+  var code = response.getResponseCode();
+  if (code !== 200) {
+    Logger.log('Claude API error: HTTP ' + code + '\n' + response.getContentText());
+    return null;
+  }
+
+  var data = JSON.parse(response.getContentText());
+  return (data.content && data.content[0] && data.content[0].text) || null;
+}
+
+/**
+ * Collects plain-text comment content from all KRs for use as AI input.
+ * Returns a string with each KR's summary and latest comment.
+ */
+function buildCommentDigest(objectiveDataList) {
+  var lines = [];
+  objectiveDataList.forEach(function(obj) {
+    lines.push('Objective: ' + obj.summary);
+    obj.krs.forEach(function(kr) {
+      lines.push('  KR: ' + kr.summary + ' (assignee: ' + kr.assigneeName + ')');
+      var commentBlocks = getLatestComment(kr.key);
+      var commentText = commentBlocks.map(function(block) {
+        return block.segments.map(function(s) { return s.text; }).join('');
+      }).join(' ').trim();
+      if (commentText) lines.push('  Latest comment: ' + commentText);
+    });
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Writes the AI summary text into the document body as a styled section
+ * immediately after the timestamp heading.
+ */
+function writeSummaryToDoc(body, summaryText) {
+  body.appendParagraph('AI Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
+  summaryText.split('\n').forEach(function(line) {
+    line = line.trim();
+    if (!line) return;
+    // Bullet lines from Claude often start with • or -
+    if (line.charAt(0) === '•' || line.charAt(0) === '-') {
+      body.appendListItem(line.substring(1).trim())
+          .setGlyphType(DocumentApp.GlyphType.BULLET);
+    } else {
+      body.appendParagraph(line);
+    }
+  });
+  body.appendParagraph('');
+}
+
 // ── Credentials setup ─────────────────────────────────────────────────────────
 
 function configureCredentials() {
@@ -639,7 +740,18 @@ function configureCredentials() {
   props.setProperty('JIRA_EMAIL',     email.getResponseText().trim());
   props.setProperty('JIRA_API_TOKEN', token.getResponseText().trim());
 
-  ui.alert('Credentials saved. Run "Verify API token" to confirm they work.');
+  ui.alert('Jira credentials saved. Run "Verify API token" to confirm they work.');
+}
+
+function configureClaudeKey() {
+  var ui    = DocumentApp.getUi();
+  var props = PropertiesService.getUserProperties();
+
+  var r = ui.prompt('Claude API Key', 'Paste your Anthropic API key (starts with sk-ant-)', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+
+  props.setProperty('CLAUDE_API_KEY', r.getResponseText().trim());
+  ui.alert('Claude API key saved.');
 }
 
 // ── Menu ──────────────────────────────────────────────────────────────────────
@@ -647,8 +759,9 @@ function configureCredentials() {
 function onOpen() {
   DocumentApp.getUi()
     .createMenu('Jira Sync')
-    .addItem('Build OKR tables',      'buildOKRTables')
+    .addItem('Build OKR tables',        'buildOKRTables')
     .addSeparator()
-    .addItem('Configure credentials', 'configureCredentials')
+    .addItem('Configure Jira credentials',   'configureCredentials')
+    .addItem('Configure Claude API key',     'configureClaudeKey')
     .addToUi();
 }
