@@ -20,7 +20,7 @@ npm run test:watch  # re-run on file save
 
 Tests live in `tests/`. They load `Code.gs` into a Node VM with all Apps Script globals stubbed out, so no Google account or internet connection is needed.
 
-**What is tested:** `adfToBlocks`, `autoLinkSegments`, `buildCommentDigest`
+**What is tested:** `adfToBlocks`, `autoLinkSegments`, `buildCommentDigest`, `buildAttentionItems`
 
 **What is not tested:** anything that calls `UrlFetchApp`, `DocumentApp`, `PropertiesService`, or `DriveApp` — those require the live Apps Script runtime.
 
@@ -37,9 +37,12 @@ Tests live in `tests/`. They load `Code.gs` into a Node VM with all Apps Script 
 
 Single `CONFIG` object with:
 - `jira.baseUrl` — Atlassian instance URL
-- `objectives` — array of Jira keys to sync
-- `krSortOrder` — `'jira'` (default, keeps Jira's order) or `'alpha'` (numeric-aware alphabetical)
-- `style` — header colors and column widths
+- `tables` — array of table configs; two modes:
+  - `{ parentKeys: [...] }` — one heading + table per parent ticket; rows are child issues; heading always derived from parent ticket summary
+  - `{ title: '...', keys: [...] }` — one flat table for a specific list of tickets; `title` is required
+- `sortOrder` — `'jira'` (default, keeps Jira's order) or `'alpha'` (numeric-aware alphabetical)
+- `style` — header colors (`headerBgColor`, `headerTextColor`)
+- `columns` — array of `{ heading, width, field }` defining the table columns
 - `aiSummary` — Claude API settings (enabled flag, model, prompt)
 
 ### `Code.gs` — key functions in order
@@ -51,10 +54,20 @@ Single `CONFIG` object with:
 | `autoLinkSegments` | Post-processes segments to turn bare URLs into linked segments |
 | `applySegmentsToText` | Applies rich-text formatting (bold, italic, links, colors) to a `Text` object |
 | `writeBlocksToCell` | Writes a block array into a `TableCell`, using native `ListItem` for lists |
-| `getLatestComment` | Fetches the most recent Jira comment and returns it as blocks |
-| `fetchChildren` / `fetchObjectiveData` | Fetches objective + KR data from Jira; applies `krSortOrder` sort |
-| `buildOKRTables` | Main entry point — clears the doc body, writes timestamp heading, optionally writes AI summary, then builds all tables |
-| `generateAiSummary` / `buildCommentDigest` / `writeSummaryToDoc` | Claude API integration for executive summary |
+| `getLatestCommentMeta` | Fetches the most recent Jira comment; returns `{ blocks, date }` |
+| `getLatestComment` | Thin wrapper over `getLatestCommentMeta` returning only blocks |
+| `jiraFieldsForColumns` | Derives Jira field list from `CONFIG.columns` |
+| `extractFieldText` | Handles nested Jira field shapes (`.name`, `.value`, `.displayName`) |
+| `mapIssue` | Raw Jira issue → standard record `{ key, summary, url, assigneeName, fields }` |
+| `sortIssues` | Sorts issues by `CONFIG.sortOrder` |
+| `fetchChildIssues` / `fetchParentData` | Fetches parent summary + child issues |
+| `fetchFlatIssues` | Fetches a specific list of issue keys directly |
+| `renderCell` | Dispatches cell rendering by `col.field` |
+| `appendIssueTable` | Builds one styled table in the document |
+| `buildTables` | Main entry point — clears doc, writes timestamp, builds comment cache, runs AI summary, renders all sections |
+| `buildCommentCache` / `buildCommentDigest` / `buildAttentionItems` | Comment cache and AI input preparation |
+| `generateAiSummary` / `writeSummaryToDoc` | Claude API integration for executive summary |
+| `parseBoldSegments` / `applyBoldSegments` | Handle `**bold**` spans in AI output |
 | `configureCredentials` / `configureClaudeKey` | Menu-driven credential storage in PropertiesService |
 | `onOpen` | Registers the Jira Sync menu |
 
@@ -89,10 +102,10 @@ lozenges, emoji, mentions, links) is handled by `inlineSegs`. Block content
 (paragraphs, bullet/ordered lists with nesting, code blocks) is handled by
 `walkBlocks` / `walkListItem`. Do not flatten lists back to prefixed text.
 
-### KR sort order
-Controlled by `CONFIG.krSortOrder`. Default `'jira'` preserves Jira's return order.
+### Sort order
+Controlled by `CONFIG.sortOrder`. Default `'jira'` preserves Jira's return order.
 `'alpha'` uses `localeCompare` with `{ numeric: true }` so embedded numbers sort
-correctly (KR2 before KR10). The sort is applied in `fetchChildren` after mapping
+correctly (KR2 before KR10). The sort is applied in `sortIssues` after mapping
 the Jira response.
 
 ### Credentials

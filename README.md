@@ -1,33 +1,29 @@
 # jira-gdoc-sync
 
-A Google Apps Script that syncs Jira OKR data into a Google Doc. Given a list of Jira objective ticket keys, it builds one table per objective, where each row represents a child KR (Key Result) ticket. Each run overwrites the document with a fresh timestamped snapshot.
+A Google Apps Script that syncs Jira ticket data into a Google Doc. Given a list of Jira ticket keys (or parent tickets whose children you want to display), it builds one or more tables in the document. Each run overwrites the document with a fresh timestamped snapshot.
 
 ## What it produces
 
-For each configured objective, the script writes:
+The script writes:
 
-- A **heading** with the objective's short name linked to the Jira ticket, followed by the full summary text
-- A **table** with one row per KR containing:
-  - **Summary** — linked to the Jira ticket
-  - **Assignee** — display name
-  - **Last Comment** — most recent comment with full rich-text formatting: bold, italic, status lozenges, bullet/numbered lists with nesting, and auto-linked URLs
+- A **timestamp heading** at the top of each run (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`)
+- An optional **AI summary** block with two sections — *Progress & Wins* and *Risks & Blockers* — and a *Needs Attention* list for tickets that are unassigned, have no comments, or have stale comments (>14 days)
+- One or more **tables**, each with a heading and configurable columns
 
-If AI summary is enabled, an executive summary of all KR comments appears between the timestamp and the tables.
-
-The document is stamped with the run timestamp (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`) at the top of each run.
+Columns are fully configurable (heading label, width, Jira field). Built-in fields include `summary` (linked to Jira), `assignee`, `latestComment` (full rich-text formatting), `status`, and `priority`. Any raw Jira field name also works.
 
 ## Setup
 
 ### 1. Create a Google Doc
 
-Open or create the Google Doc where you want the OKR tables to appear.
+Open or create the Google Doc where you want the tables to appear.
 
 ### 2. Add the script files
 
 1. In the doc, go to **Extensions → Apps Script**
 2. Replace the contents of `Code.gs` with the contents of `Code.gs` from this repo
 3. Create a second file called `Config.gs` and paste in the contents of `Config.gs` from this repo
-4. Edit `Config.gs` to set your Jira base URL and objective keys (see [Configuration](#configuration))
+4. Edit `Config.gs` to set your Jira base URL and tables (see [Configuration](#configuration))
 5. Click **Save**
 
 ### 3. Configure credentials
@@ -41,7 +37,7 @@ Credentials are stored in Google's **PropertiesService** (per-user, encrypted at
 
 ### 4. Run
 
-Go to **Jira Sync → Build OKR tables**. The document will be populated with the current OKR status.
+Go to **Jira Sync → Build tables**. The document will be populated with the current data.
 
 ## Configuration
 
@@ -53,22 +49,37 @@ var CONFIG = {
     baseUrl: 'https://your-domain.atlassian.net'
   },
 
-  // Jira issue keys for the objectives to sync
-  objectives: [
-    'PROJ-1',
-    'PROJ-2'
+  // Tables to build. Two modes:
+  //
+  // Parent/child mode — one heading + table per parent; rows are child issues:
+  //   { parentKeys: ['PROJ-1', 'PROJ-2'] }
+  //   The heading is derived from each parent ticket's own summary.
+  //
+  // Flat list mode — one heading + table for a specific list of tickets:
+  //   { title: 'My Table', keys: ['PROJ-10', 'PROJ-11'] }
+  //   'title' is required in flat mode.
+  tables: [
+    { parentKeys: ['PROJ-1', 'PROJ-2'] }
   ],
 
-  // KR sort order within each objective table
+  // Sort order within each table.
   // 'jira'  — keep the order Jira returns (default; typically creation order)
   // 'alpha' — sort alphabetically by summary, numeric-aware (KR2 before KR10)
-  krSortOrder: 'jira',
+  sortOrder: 'jira',
 
   style: {
     headerBgColor:   '#073763',  // header background
     headerTextColor: '#FFFFFF',  // header text
-    colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
   },
+
+  // Table columns — heading label, width (points), and Jira field to render.
+  // Built-in fields: 'summary', 'assignee', 'latestComment', 'status', 'priority'
+  // Any other value is treated as a raw Jira field name (e.g. 'customfield_10016').
+  columns: [
+    { heading: 'Summary',      width: 175, field: 'summary'       },
+    { heading: 'Assignee',     width: 75,  field: 'assignee'      },
+    { heading: 'Last Comment', width: 600, field: 'latestComment' },
+  ],
 
   aiSummary: {
     enabled: false,
@@ -82,19 +93,21 @@ var CONFIG = {
 
 | Menu item | Description |
 |---|---|
-| Build OKR tables | Fetches data from Jira and rebuilds the document |
+| Build tables | Fetches data from Jira and rebuilds the document |
 | Configure Jira credentials | Set Jira email and API token |
 | Configure Claude API key | Set Anthropic API key for AI summaries |
 
 ## AI summary (optional)
 
-The script can generate an executive summary of all KR comments using the Claude API, inserted at the top of the output before the tables.
+The script can generate an executive summary of all comments using the Claude API, inserted at the top of the output before the tables. It also always computes a **Needs Attention** list (locally, no AI required) for tickets that are unassigned, have no comments, or whose last comment is more than 14 days old.
 
-To enable:
+To enable the AI summary:
 
 1. Set `aiSummary.enabled: true` in `Config.gs` and customize the `prompt` if desired
 2. Go to **Jira Sync → Configure Claude API key** and paste your Anthropic API key
-3. Run **Build OKR tables** — the summary will appear below the timestamp heading
+3. Run **Build tables** — the summary will appear below the timestamp heading
+
+If the Claude API call fails, the Needs Attention section is still written. Check **View → Logs** in the Apps Script editor for diagnostic output.
 
 The API key is stored in PropertiesService alongside Jira credentials. Review your organization's AI usage policies before enabling this feature with work data.
 
@@ -105,8 +118,8 @@ The API key is stored in PropertiesService alongside Jira credentials. Review yo
 Each run overwrites the current tab. To build up a history of snapshots:
 
 1. In Google Docs, create a new tab
-2. Run **Jira Sync → Build OKR tables** in the new tab
-3. Name the tab with the timestamp written at the top of the output (e.g. `Mar 15, 2026 2:34 PM (America/Los_Angeles)`)
+2. Run **Jira Sync → Build tables** in the new tab
+3. Name the tab with the timestamp written at the top of the output
 
 Repeat for each sync cycle. Each tab becomes an archived, dated snapshot.
 
@@ -120,5 +133,5 @@ Repeat for each sync cycle. Each tab becomes an archived, dated snapshot.
 ## Notes
 
 - The script uses `POST /rest/api/3/search/jql` for Jira searches (the older `GET /rest/api/3/search` endpoint returns HTTP 410 on some Atlassian instances)
-- KRs are fetched as child issues using `parent = OBJECTIVE-KEY` JQL
+- Child issues are fetched using `parent = PARENT-KEY` JQL
 - Rich text in comments is parsed from Atlassian Document Format (ADF) and rendered with native Google Docs formatting
