@@ -316,22 +316,33 @@ function writeBlocksToCell(cell, blocks) {
   });
 }
 
-function getLatestComment(ticketId) {
+/**
+ * Fetches the latest comment for a ticket and returns:
+ *   { blocks: [...], date: Date|null }
+ * date is null when there are no comments or the date cannot be parsed.
+ * blocks is the rich-text block array ready for writeBlocksToCell.
+ */
+function getLatestCommentMeta(ticketId) {
   var EMPTY = { bold: false, italic: false, underline: false,
                 strike: false, code: false, url: null, bgColor: null, fgColor: null };
   var result = jiraGet('/rest/api/3/issue/' + ticketId + '/comment?orderBy=-created&maxResults=1');
   if (result.code !== 200)
-    return [{ type: 'para', segments: [Object.assign({ text: 'Error ' + result.code }, EMPTY)] }];
+    return { blocks: [{ type: 'para', segments: [Object.assign({ text: 'Error ' + result.code }, EMPTY)] }], date: null };
   var data = JSON.parse(result.body);
   if (!data.comments || data.comments.length === 0)
-    return [{ type: 'para', segments: [Object.assign({ text: '(no comments)' }, EMPTY)] }];
+    return { blocks: [{ type: 'para', segments: [Object.assign({ text: '(no comments)' }, EMPTY)] }], date: null };
   var c      = data.comments[0];
   var author = c.author ? c.author.displayName : 'Unknown';
-  var date   = c.created ? c.created.substring(0, 10) : '';
-  var header = { type: 'para',
-                 segments: [Object.assign({ text: '[' + author + ', ' + date + ']' },
-                                          EMPTY, { bold: true })] };
-  return [header].concat(adfToBlocks(c.body));
+  var dateStr = c.created ? c.created.substring(0, 10) : '';
+  var date    = c.created ? new Date(c.created) : null;
+  var header  = { type: 'para',
+                  segments: [Object.assign({ text: '[' + author + ', ' + dateStr + ']' },
+                                           EMPTY, { bold: true })] };
+  return { blocks: [header].concat(adfToBlocks(c.body)), date: date };
+}
+
+function getLatestComment(ticketId) {
+  return getLatestCommentMeta(ticketId).blocks;
 }
 
 // ── OKR data fetching ─────────────────────────────────────────────────────────
@@ -550,11 +561,18 @@ function buildOKRTables() {
     return fetchObjectiveData(key);
   });
 
+  // Build comment cache once — used by both the AI digest and attention items
+  var commentCache   = buildCommentCache(allObjectiveData);
+  var attentionItems = buildAttentionItems(allObjectiveData, commentCache);
+
   // AI summary — runs before the tables so it appears at the top
   if (CONFIG.aiSummary && CONFIG.aiSummary.enabled) {
-    var digest      = buildCommentDigest(allObjectiveData);
+    var digest      = buildCommentDigest(allObjectiveData, commentCache);
     var summaryText = generateAiSummary(digest);
-    if (summaryText) writeSummaryToDoc(body, summaryText);
+    if (summaryText) writeSummaryToDoc(body, summaryText, attentionItems);
+  } else if (attentionItems.length > 0) {
+    // Still write the attention section even when AI summary is disabled
+    writeSummaryToDoc(body, '', attentionItems);
   }
 
   allObjectiveData.forEach(function(data) {
@@ -612,9 +630,9 @@ function buildOKRTables() {
       // Col 2: Assignee
       row.appendTableCell(kr.assigneeName);
 
-      // Col 3: Latest comment with rich formatting
+      // Col 3: Latest comment with rich formatting (use cache to avoid redundant API call)
       var commentCell = row.appendTableCell('');
-      writeBlocksToCell(commentCell, getLatestComment(kr.key));
+      writeBlocksToCell(commentCell, commentCache[kr.key] ? commentCache[kr.key].blocks : getLatestComment(kr.key));
     });
 
     body.appendParagraph('');
@@ -688,24 +706,77 @@ function generateAiSummary(commentText) {
 }
 
 /**
- * Collects plain-text comment content from all KRs for use as AI input.
- * Returns a string with each KR's summary and latest comment.
+ * Fetches comment metadata for every KR across all objectives exactly once.
+ * Returns a plain object keyed by ticket key: { blocks, date }
  */
-function buildCommentDigest(objectiveDataList) {
+function buildCommentCache(objectiveDataList) {
+  var cache = {};
+  objectiveDataList.forEach(function(obj) {
+    obj.krs.forEach(function(kr) {
+      if (!cache[kr.key]) cache[kr.key] = getLatestCommentMeta(kr.key);
+    });
+  });
+  return cache;
+}
+
+/**
+ * Collects plain-text comment content from all KRs for use as AI input.
+ * Uses a pre-built comment cache to avoid redundant API calls.
+ */
+function buildCommentDigest(objectiveDataList, commentCache) {
   var lines = [];
   objectiveDataList.forEach(function(obj) {
     lines.push('Objective: ' + obj.summary);
     obj.krs.forEach(function(kr) {
       lines.push('  KR: ' + kr.summary + ' (assignee: ' + kr.assigneeName + ')');
-      var commentBlocks = getLatestComment(kr.key);
-      var commentText = commentBlocks.map(function(block) {
+      var meta = commentCache[kr.key];
+      var commentText = meta ? meta.blocks.map(function(block) {
         return block.segments.map(function(s) { return s.text; }).join('');
-      }).join(' ').trim();
+      }).join(' ').trim() : '';
       if (commentText) lines.push('  Latest comment: ' + commentText);
     });
     lines.push('');
   });
   return lines.join('\n');
+}
+
+/**
+ * Returns an array of { summary, url, reason } objects for KRs that need attention:
+ *   - unassigned owner
+ *   - no comments at all
+ *   - latest comment is more than STALE_DAYS old
+ */
+function buildAttentionItems(objectiveDataList, commentCache) {
+  var STALE_DAYS = 14;
+  var now        = new Date();
+  var items      = [];
+
+  objectiveDataList.forEach(function(obj) {
+    obj.krs.forEach(function(kr) {
+      var reasons = [];
+
+      if (!kr.assigneeName || kr.assigneeName === 'Unassigned') {
+        reasons.push('no owner assigned');
+      }
+
+      var meta = commentCache[kr.key];
+      if (!meta || !meta.date) {
+        reasons.push('no updates');
+      } else {
+        var ageDays = (now - meta.date) / (1000 * 60 * 60 * 24);
+        if (ageDays > STALE_DAYS) {
+          var daysAgo = Math.floor(ageDays);
+          reasons.push('last update ' + daysAgo + ' days ago');
+        }
+      }
+
+      if (reasons.length > 0) {
+        items.push({ summary: kr.summary, url: kr.url, reason: reasons.join('; ') });
+      }
+    });
+  });
+
+  return items;
 }
 
 /**
@@ -739,46 +810,66 @@ function applyBoldSegments(t, segments) {
 }
 
 /**
- * Writes the AI summary into the document body using native Google Docs formatting.
+ * Writes the AI summary and attention items into the document body.
  *
- * Expected Claude output format:
- *   SECTION: <title>
- *   ITEM: <text with optional **bold**>
+ * summaryText uses SECTION:/ITEM: format from Claude.
+ * attentionItems is an array of { summary, url, reason } from buildAttentionItems.
  *
- * SECTION lines → HEADING3. ITEM lines → native bullet list items with bold preserved.
- * Stray leading markdown chars (#, -, •) are stripped; **bold** spans are rendered natively.
+ * SECTION lines → HEADING3. ITEM lines → native bullet list items with **bold** preserved.
+ * The "Needs Attention" section is always appended after the AI sections.
  */
-function writeSummaryToDoc(body, summaryText) {
+function writeSummaryToDoc(body, summaryText, attentionItems) {
   body.appendParagraph('AI Summary').setHeading(DocumentApp.ParagraphHeading.HEADING2);
 
   var firstListItem = null;
 
-  summaryText.split('\n').forEach(function(raw) {
-    var line = raw.trim();
-    if (!line) return;
+  if (summaryText) {
+    summaryText.split('\n').forEach(function(raw) {
+      var line = raw.trim();
+      if (!line) return;
 
-    // Strip stray leading markdown chars that aren't part of SECTION/ITEM structure
-    line = line.replace(/^#+\s*/, '').replace(/^[-•]\s*/, '');
+      // Strip stray leading markdown chars that aren't part of SECTION/ITEM structure
+      line = line.replace(/^#+\s*/, '').replace(/^[-•]\s*/, '');
 
-    if (line.indexOf('SECTION:') === 0) {
-      var title = line.substring('SECTION:'.length).trim();
-      body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING3);
-      firstListItem = null;  // each section starts a fresh list
-    } else if (line.indexOf('ITEM:') === 0) {
-      var itemText = line.substring('ITEM:'.length).trim();
+      if (line.indexOf('SECTION:') === 0) {
+        var title = line.substring('SECTION:'.length).trim();
+        body.appendParagraph(title).setHeading(DocumentApp.ParagraphHeading.HEADING3);
+        firstListItem = null;  // each section starts a fresh list
+      } else if (line.indexOf('ITEM:') === 0) {
+        var itemText = line.substring('ITEM:'.length).trim();
+        var item = body.appendListItem('').setGlyphType(DocumentApp.GlyphType.BULLET);
+        if (firstListItem) {
+          item.setListId(firstListItem);
+        } else {
+          firstListItem = item;
+        }
+        applyBoldSegments(item.editAsText(), parseBoldSegments(itemText));
+      } else {
+        // Unexpected line — render as plain paragraph and reset list anchor
+        firstListItem = null;
+        body.appendParagraph(line);
+      }
+    });
+  }
+
+  // Needs Attention section — always computed locally, no AI involved
+  if (attentionItems && attentionItems.length > 0) {
+    body.appendParagraph('Needs Attention').setHeading(DocumentApp.ParagraphHeading.HEADING3);
+    firstListItem = null;
+    attentionItems.forEach(function(a) {
       var item = body.appendListItem('').setGlyphType(DocumentApp.GlyphType.BULLET);
       if (firstListItem) {
         item.setListId(firstListItem);
       } else {
         firstListItem = item;
       }
-      applyBoldSegments(item.editAsText(), parseBoldSegments(itemText));
-    } else {
-      // Unexpected line — render as plain paragraph and reset list anchor
-      firstListItem = null;
-      body.appendParagraph(line);
-    }
-  });
+      // Render "KR summary (reason)" with the KR name as a hyperlink
+      var t = item.editAsText();
+      var label  = a.summary + ' (' + a.reason + ')';
+      t.setText(label);
+      t.setLinkUrl(0, a.summary.length - 1, a.url);
+    });
+  }
 
   body.appendParagraph('');
 }
