@@ -23,8 +23,25 @@ var CONFIG = {
   style: {
     headerBgColor:   '#15191d',  // dark blue
     headerTextColor: '#FFFFFF',  // white
-    colWidths:       [175, 75, 600]  // points: Summary, Assignee, Last Comment
   },
+
+  // Table columns — defines heading label, width (points), and which Jira field to render.
+  //
+  // Built-in field values:
+  //   'summary'        — KR summary text, hyperlinked to Jira
+  //   'assignee'       — assignee display name (plain text)
+  //   'latestComment'  — most recent comment with full rich-text formatting
+  //   'status'         — issue status name (plain text)
+  //   'priority'       — priority name (plain text)
+  //
+  // Any other value is treated as a raw Jira field name (e.g. 'customfield_10016')
+  // and rendered as plain text.  The field must be a simple scalar or have a .name
+  // or .value sub-property.
+  columns: [
+    { heading: 'Summary',      width: 175, field: 'summary'       },
+    { heading: 'Assignee',     width: 75,  field: 'assignee'      },
+    { heading: 'Last Comment', width: 600, field: 'latestComment' },
+  ],
 
   // AI summary section — set enabled: true and configure your Claude API key via
   // Jira Sync > Configure credentials to use this feature.

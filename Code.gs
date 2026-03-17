@@ -478,11 +478,37 @@ function getParentLinkFieldId() {
 }
 
 /**
+ * Returns the Jira field names to request for the configured columns.
+ * 'latestComment' is fetched separately; all others map directly to Jira field names.
+ * 'summary' is always included (needed for headings, sort, and attention items).
+ */
+function jiraFieldsForColumns() {
+  var fields = { summary: true, assignee: true };  // always fetch these two
+  (CONFIG.columns || []).forEach(function(col) {
+    if (col.field && col.field !== 'latestComment') fields[col.field] = true;
+  });
+  return Object.keys(fields);
+}
+
+/**
+ * Extracts a plain-text value from a Jira field, handling common nested shapes:
+ *   { name: '...' }, { value: '...' }, { displayName: '...' }, or a bare scalar.
+ */
+function extractFieldText(fieldValue) {
+  if (fieldValue === null || fieldValue === undefined) return '';
+  if (typeof fieldValue === 'object') {
+    return fieldValue.displayName || fieldValue.name || fieldValue.value || JSON.stringify(fieldValue);
+  }
+  return String(fieldValue);
+}
+
+/**
  * Fetches child issues of an objective. Tries multiple JQL strategies,
  * including querying by numeric issue ID which works when key-based queries fail.
  */
 function fetchChildren(objectiveKey) {
-  var cfg = getConfig();
+  var cfg    = getConfig();
+  var fields = jiraFieldsForColumns();
 
   var strategies = [
     'parent = ' + objectiveKey + ' ORDER BY created ASC',
@@ -490,7 +516,7 @@ function fetchChildren(objectiveKey) {
   ];
 
   for (var i = 0; i < strategies.length; i++) {
-    var result = jiraSearch(strategies[i], ['summary', 'assignee'], 50);
+    var result = jiraSearch(strategies[i], fields, 50);
     Logger.log('[' + strategies[i] + '] → HTTP ' + result.code +
                (result.code === 200 ? ', total=' + JSON.parse(result.body).total : ''));
     if (result.code !== 200) continue;
@@ -499,12 +525,13 @@ function fetchChildren(objectiveKey) {
 
     Logger.log(objectiveKey + ': found ' + data.issues.length + ' KR(s) via [' + strategies[i] + ']');
     return data.issues.map(function(issue) {
+      var f = issue.fields || {};
       return {
         key:          issue.key,
-        summary:      (issue.fields && issue.fields.summary) || '(no summary)',
+        summary:      f.summary || '(no summary)',
         url:          cfg.baseUrl + '/browse/' + issue.key,
-        assigneeName: (issue.fields && issue.fields.assignee)
-                        ? issue.fields.assignee.displayName : 'Unassigned'
+        assigneeName: f.assignee ? f.assignee.displayName : 'Unassigned',
+        fields:       f   // full fields bag for generic column rendering
       };
     }).sort(function(a, b) {
       if (CONFIG.krSortOrder !== 'alpha') return 0;
@@ -532,7 +559,41 @@ function fetchObjectiveData(objectiveKey) {
 
 // ── OKR document builder ──────────────────────────────────────────────────────
 
-var HEADER_COLS = ['Summary', 'Assignee', 'Last Comment'];
+/**
+ * Renders a single table cell for a KR row based on the column's field value.
+ * Mutates the cell in place.
+ */
+function renderCell(cell, col, kr, commentCache) {
+  switch (col.field) {
+    case 'summary':
+      var t = cell.editAsText();
+      t.setText(kr.summary);
+      if (kr.summary.length > 0) t.setLinkUrl(0, kr.summary.length - 1, kr.url);
+      break;
+
+    case 'assignee':
+      cell.setText(kr.assigneeName);
+      break;
+
+    case 'latestComment':
+      var meta = commentCache[kr.key];
+      writeBlocksToCell(cell, meta ? meta.blocks : getLatestComment(kr.key));
+      break;
+
+    case 'status':
+      cell.setText(extractFieldText(kr.fields && kr.fields.status));
+      break;
+
+    case 'priority':
+      cell.setText(extractFieldText(kr.fields && kr.fields.priority));
+      break;
+
+    default:
+      // Generic Jira field — render as plain text
+      cell.setText(extractFieldText(kr.fields && kr.fields[col.field]));
+      break;
+  }
+}
 
 /**
  * Clears the document and builds one table per objective.
@@ -595,41 +656,35 @@ function buildOKRTables() {
       return;
     }
 
+    var columns = CONFIG.columns || [
+      { heading: 'Summary',      width: 175, field: 'summary'       },
+      { heading: 'Assignee',     width: 75,  field: 'assignee'      },
+      { heading: 'Last Comment', width: 600, field: 'latestComment' },
+    ];
+
     var table = body.appendTable();
 
     // Header row
     var headerRow = table.appendTableRow();
-    HEADER_COLS.forEach(function(label) {
-      var cell = headerRow.appendTableCell(label);
+    columns.forEach(function(col) {
+      var cell = headerRow.appendTableCell(col.heading);
       cell.setBackgroundColor(style.headerBgColor);
       var t = cell.editAsText();
-      t.setBold(0, label.length - 1, true);
-      t.setForegroundColor(0, label.length - 1, style.headerTextColor);
+      t.setBold(0, col.heading.length - 1, true);
+      t.setForegroundColor(0, col.heading.length - 1, style.headerTextColor);
     });
 
     // Set column widths
-    style.colWidths.forEach(function(width, idx) {
-      if (idx < HEADER_COLS.length) {
-        try { table.setColumnWidth(idx, width); } catch(e) {}
-      }
+    columns.forEach(function(col, idx) {
+      if (col.width) try { table.setColumnWidth(idx, col.width); } catch(e) {}
     });
 
     // One row per KR
     data.krs.forEach(function(kr) {
       var row = table.appendTableRow();
-
-      // Col 1: KR summary as hyperlink to Jira
-      var summaryCell = row.appendTableCell('');
-      var t = summaryCell.editAsText();
-      t.setText(kr.summary);
-      t.setLinkUrl(0, kr.summary.length - 1, kr.url);
-
-      // Col 2: Assignee
-      row.appendTableCell(kr.assigneeName);
-
-      // Col 3: Latest comment with rich formatting (use cache to avoid redundant API call)
-      var commentCell = row.appendTableCell('');
-      writeBlocksToCell(commentCell, commentCache[kr.key] ? commentCache[kr.key].blocks : getLatestComment(kr.key));
+      columns.forEach(function(col) {
+        renderCell(row.appendTableCell(''), col, kr, commentCache);
+      });
     });
 
     body.appendParagraph('');
