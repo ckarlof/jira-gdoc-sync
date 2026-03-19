@@ -493,9 +493,20 @@ function getParentLinkFieldId() {
  */
 function jiraFieldsForColumns() {
   var fields = { summary: true, assignee: true };
+  var needsDepFields = false;
   (CONFIG.columns || []).forEach(function(col) {
-    if (col.field && col.field !== 'latestComment') fields[col.field] = true;
+    if (col.field && col.field !== 'latestComment' && col.field !== 'dependencySummary') {
+      fields[col.field] = true;
+    }
+    if (col.field === 'dependencySummary') {
+      needsDepFields = true;
+    }
   });
+  // Add fields required for dependency analysis
+  if (needsDepFields) {
+    fields.status = true;
+    fields.updated = true;
+  }
   return Object.keys(fields);
 }
 
@@ -596,7 +607,221 @@ function fetchFlatIssues(keys) {
   return sortIssues((data.issues || []).map(mapIssue));
 }
 
+// ── Dependency Analysis ───────────────────────────────────────────────────────
+
+/**
+ * Fetches a single issue with expanded issuelinks.
+ * Returns the issue with a normalized links array.
+ */
+function fetchIssueWithLinks(issueKey, fields) {
+  if (!fields) fields = jiraFieldsForColumns();
+
+  // Ensure issuelinks is included in the fields list (required for expand to work)
+  var fieldsWithLinks = fields.slice(); // copy array
+  if (fieldsWithLinks.indexOf('issuelinks') === -1) {
+    fieldsWithLinks.push('issuelinks');
+  }
+
+  var cfg    = getConfig();
+  var path   = '/rest/api/3/issue/' + issueKey + '?fields=' + fieldsWithLinks.join(',') +
+               '&expand=issuelinks';
+  var result = jiraGet(path);
+
+  if (result.code !== 200) {
+    Logger.log('fetchIssueWithLinks failed for ' + issueKey + ': HTTP ' + result.code);
+    return null;
+  }
+
+  var raw = JSON.parse(result.body);
+  var issue = mapIssue(raw);
+
+  // Normalize issuelinks into { type, direction, linkedIssue } format
+  var links = [];
+  var rawLinks = raw.fields.issuelinks || [];
+
+  rawLinks.forEach(function(link) {
+    var type = link.type ? link.type.name : 'unknown';
+    if (link.outwardIssue) {
+      links.push({
+        type: type,
+        direction: 'outward',
+        linkedIssue: link.outwardIssue
+      });
+    }
+    if (link.inwardIssue) {
+      links.push({
+        type: type,
+        direction: 'inward',
+        linkedIssue: link.inwardIssue
+      });
+    }
+  });
+
+  issue.links = links;
+
+  // Log what we found
+  if (links.length > 0) {
+    Logger.log('  → Found ' + links.length + ' link(s) for ' + issueKey + ':');
+    links.forEach(function(link) {
+      Logger.log('    - ' + link.direction + ' "' + link.type + '" → ' + link.linkedIssue.key);
+    });
+  } else {
+    Logger.log('  → No links found for ' + issueKey);
+  }
+
+  return issue;
+}
+
+/**
+ * Recursively fetches linked issues up to maxDepth levels.
+ * Filters linked issues by cutoffDate (only include if updated >= cutoffDate).
+ * Returns { nodes: [issueRecords], links: [{from, to, type, direction}] }.
+ */
+function fetchDependencyTree(rootKey, maxDepth, cutoffDate, visitedKeys) {
+  if (maxDepth === 0 || visitedKeys[rootKey]) {
+    return { nodes: [], links: [] };
+  }
+
+  visitedKeys[rootKey] = true;
+  var rootIssue = fetchIssueWithLinks(rootKey);
+
+  if (!rootIssue) {
+    return { nodes: [], links: [] };
+  }
+
+  var allNodes = [rootIssue];
+  var allLinks = [];
+
+  var totalLinks = (rootIssue.links || []).length;
+  var processedCount = 0;
+  var skippedOldCount = 0;
+  var skippedVisitedCount = 0;
+
+  // Process each link - fetch full details first, then filter by date
+  (rootIssue.links || []).forEach(function(link) {
+    var linkedKey = link.linkedIssue.key;
+
+    // Skip if already visited (cycle prevention)
+    if (visitedKeys[linkedKey]) {
+      skippedVisitedCount++;
+      Logger.log('  ✗ Skipping ' + linkedKey + ' - already visited (cycle prevention)');
+      return;
+    }
+
+    // Recursively fetch the linked issue (this gets full details including updated field)
+    var childTree = fetchDependencyTree(linkedKey, maxDepth - 1, cutoffDate, visitedKeys);
+
+    // Check if we got the linked issue and if it passes the date filter
+    if (childTree.nodes && childTree.nodes.length > 0) {
+      var linkedIssue = childTree.nodes[0]; // First node is the issue itself
+
+      // Check updated date
+      if (linkedIssue.fields && linkedIssue.fields.updated) {
+        var updatedDate = new Date(linkedIssue.fields.updated);
+        if (updatedDate < cutoffDate) {
+          var daysAgo = Math.floor((Date.now() - updatedDate.getTime()) / (24 * 60 * 60 * 1000));
+          Logger.log('  ✗ Skipping ' + linkedKey + ' - updated ' + daysAgo + ' days ago (cutoff: ' +
+                     Math.floor((Date.now() - cutoffDate.getTime()) / (24 * 60 * 60 * 1000)) + ' days)');
+          skippedOldCount++;
+          return;
+        }
+      }
+
+      // Include this link and its subtree
+      allLinks.push({
+        from: rootKey,
+        to: linkedKey,
+        type: link.type,
+        direction: link.direction
+      });
+      allNodes = allNodes.concat(childTree.nodes);
+      allLinks = allLinks.concat(childTree.links);
+      processedCount++;
+    }
+  });
+
+  if (totalLinks > 0) {
+    Logger.log('  → Processed ' + processedCount + ' of ' + totalLinks + ' links ' +
+               '(skipped: ' + skippedOldCount + ' old, ' + skippedVisitedCount + ' visited) ' +
+               '(depth=' + maxDepth + ')');
+  }
+
+  return { nodes: allNodes, links: allLinks };
+}
+
+/**
+ * Builds dependency trees for all issues in the array.
+ * Returns { [issueKey]: depTree }.
+ */
+function buildDependencyTreeForIssues(issues, config) {
+  var cutoffDate = new Date(Date.now() - (config.cutoffDays * 24 * 60 * 60 * 1000));
+  Logger.log('Dependency analysis: cutoff date = ' + cutoffDate.toISOString() +
+             ' (last ' + config.cutoffDays + ' days, maxDepth=' + config.maxDepth + ')');
+
+  var cache = {};
+
+  issues.forEach(function(issue) {
+    Logger.log('Building dependency tree for ' + issue.key + '...');
+    var visitedKeys = {};
+    var depTree = fetchDependencyTree(issue.key, config.maxDepth, cutoffDate, visitedKeys);
+    cache[issue.key] = depTree;
+
+    // Summary for this issue
+    var nodeCount = depTree.nodes ? depTree.nodes.length : 0;
+    var linkCount = depTree.links ? depTree.links.length : 0;
+    Logger.log('  ✓ ' + issue.key + ': found ' + (nodeCount - 1) + ' linked issue(s), ' + linkCount + ' link(s)');
+    if (nodeCount > 1) {
+      depTree.nodes.forEach(function(node) {
+        if (node.key !== issue.key) {
+          Logger.log('    • ' + node.key + ' - ' + node.summary.substring(0, 60));
+        }
+      });
+    }
+  });
+
+  return cache;
+}
+
 // ── OKR document builder ──────────────────────────────────────────────────────
+
+/**
+ * Sets text in a cell with automatic hyperlinking of Jira ticket keys.
+ * Finds patterns like PROJ-123, ABC-456, etc. and converts them to clickable links.
+ */
+function setTextWithTicketLinks(cell, text) {
+  if (!text) {
+    cell.setText('');
+    return;
+  }
+
+  var cfg = getConfig();
+  var baseUrl = cfg.baseUrl;
+
+  // Regex to match Jira ticket keys: 1+ uppercase letters, dash, 1+ digits
+  // Matches: PROJ-123, ABC-456, INFOKR-27, etc.
+  var ticketKeyRegex = /\b([A-Z][A-Z0-9]+-\d+)\b/g;
+
+  // Find all ticket keys and their positions
+  var matches = [];
+  var match;
+  while ((match = ticketKeyRegex.exec(text)) !== null) {
+    matches.push({
+      key: match[1],
+      start: match.index,
+      end: match.index + match[1].length
+    });
+  }
+
+  // Set the text first
+  var t = cell.editAsText();
+  t.setText(text);
+
+  // Apply links to each ticket key
+  matches.forEach(function(m) {
+    var url = baseUrl + '/browse/' + m.key;
+    t.setLinkUrl(m.start, m.end - 1, url);
+  });
+}
 
 /**
  * Renders a single table cell for a KR row based on the column's field value.
@@ -625,6 +850,13 @@ function renderCell(cell, col, kr, commentCache) {
 
     case 'priority':
       cell.setText(extractFieldText(kr.fields && kr.fields.priority));
+      break;
+
+    case 'dependencySummary':
+      var summaryCache = commentCache._depSummaries || {};
+      var summaryText = summaryCache[kr.key] || '(dependency analysis not available)';
+      // Auto-link ticket keys in the summary
+      setTextWithTicketLinks(cell, summaryText);
       break;
 
     default:
@@ -720,6 +952,81 @@ function buildTables() {
 
   var commentCache   = buildCommentCache(allIssueGroups);
   var attentionItems = buildAttentionItems(allIssueGroups, commentCache);
+
+  // ── Dependency analysis (if enabled) ──────────────────────────────────────────
+  var depSummaryCache = {};
+  if (CONFIG.dependencyAnalysis && CONFIG.dependencyAnalysis.enabled) {
+    // Check if any column uses dependencySummary
+    var needsDepAnalysis = columns.some(function(col) {
+      return col.field === 'dependencySummary';
+    });
+
+    if (needsDepAnalysis) {
+      Logger.log('Building dependency trees...');
+
+      // Collect all issues across all sections
+      var allIssues = [];
+      allSections.forEach(function(s) { allIssues = allIssues.concat(s.issues); });
+
+      // Build dependency trees
+      var depTreeCache = buildDependencyTreeForIssues(allIssues, {
+        maxDepth: CONFIG.dependencyAnalysis.maxDepth,
+        cutoffDays: CONFIG.dependencyAnalysis.cutoffDays
+      });
+
+      // Extend comment cache to include linked issues
+      Logger.log('Fetching comments for linked dependencies...');
+      var linkedIssueKeys = [];
+      Object.keys(depTreeCache).forEach(function(rootKey) {
+        var depTree = depTreeCache[rootKey];
+        (depTree.nodes || []).forEach(function(node) {
+          if (node.key !== rootKey && !commentCache[node.key]) {
+            linkedIssueKeys.push(node.key);
+          }
+        });
+      });
+
+      // Fetch comments for linked issues
+      if (linkedIssueKeys.length > 0) {
+        Logger.log('  → Fetching comments for ' + linkedIssueKeys.length + ' linked issue(s)');
+        linkedIssueKeys.forEach(function(key) {
+          commentCache[key] = getLatestCommentMeta(key);
+        });
+      }
+
+      // Build digests and separate issues with/without dependencies
+      var depDigests = [];
+      allIssues.forEach(function(issue) {
+        var depTree = depTreeCache[issue.key] || { nodes: [], links: [] };
+
+        // Check if there are actual linked issues (not just the root)
+        if (depTree.nodes && depTree.nodes.length > 1) {
+          depDigests.push({
+            key: issue.key,
+            digest: buildDependencyDigest(issue, depTree, commentCache)
+          });
+        } else {
+          // No dependencies - set simple message without calling AI
+          depSummaryCache[issue.key] = '(no linked dependencies)';
+        }
+      });
+
+      // Generate AI summaries for issues with dependencies (batched)
+      if (depDigests.length > 0) {
+        var aiSummaries = generateBatchedTicketSummaries(depDigests);
+        // Merge AI summaries into the cache
+        Object.keys(aiSummaries).forEach(function(key) {
+          depSummaryCache[key] = aiSummaries[key];
+        });
+      }
+
+      Logger.log('Dependency analysis complete: ' + depDigests.length + ' AI summaries generated, ' +
+                 (allIssues.length - depDigests.length) + ' tickets without dependencies');
+    }
+  }
+
+  // Store in commentCache for renderCell access
+  commentCache._depSummaries = depSummaryCache;
 
   if (CONFIG.aiSummary && CONFIG.aiSummary.enabled) {
     var digest      = buildCommentDigest(allIssueGroups, commentCache);
@@ -829,6 +1136,163 @@ function generateAiSummary(commentText) {
 }
 
 /**
+ * Generates AI summaries for multiple tickets in batched Claude API calls.
+ * Takes array of { key, digest } objects and returns { [ticketKey]: summaryText }.
+ */
+function generateBatchedTicketSummaries(depDigests) {
+  if (!depDigests || depDigests.length === 0) return {};
+
+  var depAnalysis = CONFIG.dependencyAnalysis;
+  if (!depAnalysis || !depAnalysis.enabled) return {};
+
+  var props = PropertiesService.getUserProperties();
+  var claudeKey = props.getProperty('CLAUDE_API_KEY');
+  if (!claudeKey) {
+    Logger.log('Dependency analysis skipped: CLAUDE_API_KEY not set.');
+    return {};
+  }
+
+  // Determine which model to use
+  var model;
+  if (depAnalysis.model && depAnalysis.model !== 'default') {
+    // Use model specified in dependencyAnalysis config
+    model = depAnalysis.model;
+  } else {
+    // Use model from aiSummary config, or fallback to claude-opus-4-6
+    model = (CONFIG.aiSummary && CONFIG.aiSummary.model) || 'claude-opus-4-6';
+  }
+
+  var prompt = depAnalysis.prompt || 'Analyze this ticket and its dependencies.';
+
+  Logger.log('Using Claude model for dependency analysis: ' + model);
+
+  var results = {};
+  var batchSize = 10;
+
+  // Process in batches
+  for (var i = 0; i < depDigests.length; i += batchSize) {
+    var batch = depDigests.slice(i, i + batchSize);
+    Logger.log('Processing dependency summaries batch ' + (Math.floor(i / batchSize) + 1) +
+               ' (' + batch.length + ' tickets)...');
+
+    // Build batched prompt
+    var batchPrompt = 'Analyze the following tickets. For each ticket, respond with:\n' +
+                      'TICKET:[ticket-key]\n' +
+                      'SUMMARY:[your 2-3 sentence summary]\n\n' +
+                      'IMPORTANT: In your summary, reference specific ticket keys (like PROJ-123) when mentioning progress, blockers, or risks. ' +
+                      'These will be automatically converted to clickable links.\n\n' +
+                      prompt + '\n\n';
+
+    batch.forEach(function(item) {
+      batchPrompt += '--- Ticket: ' + item.key + ' ---\n';
+      batchPrompt += item.digest + '\n\n';
+    });
+
+    // Log the full prompt for debugging
+    Logger.log('Dependency analysis prompt for batch ' + (Math.floor(i / batchSize) + 1) + ':');
+    Logger.log('--- PROMPT START ---');
+    Logger.log(batchPrompt);
+    Logger.log('--- PROMPT END ---');
+    Logger.log('Prompt length: ' + batchPrompt.length + ' characters');
+
+    var payload = JSON.stringify({
+      model: model,
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: batchPrompt }]
+    });
+
+    try {
+      var response = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': claudeKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        payload: payload,
+        muteHttpExceptions: true
+      });
+
+      var code = response.getResponseCode();
+      if (code !== 200) {
+        Logger.log('Claude API error for batch: HTTP ' + code + '\n' + response.getContentText());
+        // Mark all tickets in this batch as unavailable
+        batch.forEach(function(item) {
+          results[item.key] = '(AI summary unavailable)';
+        });
+        continue;
+      }
+
+      var data = JSON.parse(response.getContentText());
+      var text = (data.content && data.content[0] && data.content[0].text) || '';
+
+      // Log Claude's response
+      Logger.log('Claude API response:');
+      Logger.log('--- RESPONSE START ---');
+      Logger.log(text);
+      Logger.log('--- RESPONSE END ---');
+
+      // Parse the batched response
+      var batchResults = parseTicketSummaries(text);
+
+      // Merge into results
+      batch.forEach(function(item) {
+        results[item.key] = batchResults[item.key] || '(summary not found in response)';
+      });
+
+      Logger.log('Batch processed successfully - extracted summaries for: ' + Object.keys(batchResults).join(', '));
+    } catch (e) {
+      Logger.log('Error calling Claude API for batch: ' + e.toString());
+      batch.forEach(function(item) {
+        results[item.key] = '(error generating summary)';
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Parses Claude's batched ticket summary response.
+ * Expected format: TICKET:[KEY]\nSUMMARY:[text]
+ */
+function parseTicketSummaries(claudeResponse) {
+  var results = {};
+  if (!claudeResponse) return results;
+
+  var lines = claudeResponse.split('\n');
+  var currentTicket = null;
+  var currentSummary = [];
+
+  lines.forEach(function(line) {
+    var ticketMatch = line.match(/^TICKET:\s*(.+)$/);
+    var summaryMatch = line.match(/^SUMMARY:\s*(.+)$/);
+
+    if (ticketMatch) {
+      // Save previous ticket if exists
+      if (currentTicket) {
+        results[currentTicket] = currentSummary.join(' ').trim();
+      }
+      // Start new ticket
+      currentTicket = ticketMatch[1].trim();
+      currentSummary = [];
+    } else if (summaryMatch && currentTicket) {
+      currentSummary.push(summaryMatch[1].trim());
+    } else if (currentTicket && line.trim() && !line.match(/^---/)) {
+      // Continue multi-line summary
+      currentSummary.push(line.trim());
+    }
+  });
+
+  // Save last ticket
+  if (currentTicket) {
+    results[currentTicket] = currentSummary.join(' ').trim();
+  }
+
+  return results;
+}
+
+/**
  * Fetches comment metadata for every issue across all groups exactly once.
  * Returns a plain object keyed by ticket key: { blocks, date }
  */
@@ -860,6 +1324,106 @@ function buildCommentDigest(objectiveDataList, commentCache) {
     });
     lines.push('');
   });
+  return lines.join('\n');
+}
+
+/**
+ * Converts a dependency tree to text format for AI consumption.
+ * Includes root ticket metadata and linked issues organized by level.
+ */
+function buildDependencyDigest(rootIssue, depTree, commentCache) {
+  var lines = [];
+
+  // Root ticket info
+  lines.push('Root Ticket: ' + rootIssue.key + ' - ' + rootIssue.summary);
+  if (rootIssue.fields.status) {
+    lines.push('Status: ' + (rootIssue.fields.status.name || 'Unknown'));
+  }
+  lines.push('Assignee: ' + rootIssue.assigneeName);
+  if (rootIssue.fields.updated) {
+    lines.push('Updated: ' + rootIssue.fields.updated);
+  }
+  lines.push('');
+
+  // If no linked issues, note that
+  if (!depTree.nodes || depTree.nodes.length <= 1) {
+    lines.push('No linked issues found with recent updates.');
+    return lines.join('\n');
+  }
+
+  lines.push('Linked Issues (updated in last ' + (CONFIG.dependencyAnalysis.cutoffDays || 14) + ' days):');
+  lines.push('');
+
+  // Build a map of issue key to depth
+  var depthMap = {};
+  depthMap[rootIssue.key] = 0;
+
+  // BFS to calculate depths
+  var queue = [rootIssue.key];
+  while (queue.length > 0) {
+    var currentKey = queue.shift();
+    var currentDepth = depthMap[currentKey];
+
+    (depTree.links || []).forEach(function(link) {
+      if (link.from === currentKey && !depthMap[link.to]) {
+        depthMap[link.to] = currentDepth + 1;
+        queue.push(link.to);
+      }
+    });
+  }
+
+  // Group nodes by depth
+  var nodesByDepth = {};
+  (depTree.nodes || []).forEach(function(node) {
+    if (node.key === rootIssue.key) return; // Skip root
+    var depth = depthMap[node.key] || 1;
+    if (!nodesByDepth[depth]) nodesByDepth[depth] = [];
+    nodesByDepth[depth].push(node);
+  });
+
+  // Output nodes by depth
+  Object.keys(nodesByDepth).sort().forEach(function(depth) {
+    nodesByDepth[depth].forEach(function(node) {
+      // Find the link type for this node
+      var linkType = 'linked';
+      var parentKey = null;
+      (depTree.links || []).forEach(function(link) {
+        if (link.to === node.key) {
+          linkType = link.type;
+          parentKey = link.from;
+        }
+      });
+
+      var prefix = 'Level ' + depth + ' - ' + linkType;
+      if (depth > 1 && parentKey) {
+        prefix += ' (via ' + parentKey + ')';
+      }
+      prefix += ' - ' + node.key + ': ' + node.summary;
+      lines.push(prefix);
+
+      // Add metadata
+      var meta = [];
+      if (node.fields.status) meta.push('Status: ' + node.fields.status.name);
+      meta.push('Assignee: ' + node.assigneeName);
+      if (node.fields.updated) meta.push('Updated: ' + node.fields.updated);
+      lines.push('  ' + meta.join(' | '));
+
+      // Add comment if available
+      if (commentCache && commentCache[node.key]) {
+        var commentMeta = commentCache[node.key];
+        var commentText = commentMeta.blocks.map(function(block) {
+          return block.segments.map(function(s) { return s.text; }).join('');
+        }).join(' ').trim();
+        if (commentText) {
+          // Truncate long comments
+          if (commentText.length > 200) commentText = commentText.substring(0, 200) + '...';
+          lines.push('  Latest comment: ' + commentText);
+        }
+      }
+      lines.push('');
+    });
+  });
+
   return lines.join('\n');
 }
 

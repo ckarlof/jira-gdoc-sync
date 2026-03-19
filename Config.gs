@@ -20,6 +20,7 @@ var CONFIG = {
   //
   tables: [
     { parentKeys: ['INFOKR-1', 'INFOKR-3', 'INFOKR-5', 'INFOKR-6'] }
+// { parentKeys: ['INFOKR-1'] }
   ],
 
   // How issues are ordered within each table.
@@ -35,19 +36,21 @@ var CONFIG = {
   // Table columns — defines heading label, width (points), and which Jira field to render.
   //
   // Built-in field values:
-  //   'summary'        — KR summary text, hyperlinked to Jira
-  //   'assignee'       — assignee display name (plain text)
-  //   'latestComment'  — most recent comment with full rich-text formatting
-  //   'status'         — issue status name (plain text)
-  //   'priority'       — priority name (plain text)
+  //   'summary'            — KR summary text, hyperlinked to Jira
+  //   'assignee'           — assignee display name (plain text)
+  //   'latestComment'      — most recent comment with full rich-text formatting
+  //   'dependencySummary'  — AI-powered analysis of linked issues (requires dependencyAnalysis.enabled)
+  //   'status'             — issue status name (plain text)
+  //   'priority'           — priority name (plain text)
   //
   // Any other value is treated as a raw Jira field name (e.g. 'customfield_10016')
   // and rendered as plain text.  The field must be a simple scalar or have a .name
   // or .value sub-property.
   columns: [
-    { heading: 'Summary',      width: 175, field: 'summary'       },
+    { heading: 'Summary',      width: 150, field: 'summary'       },
     { heading: 'Assignee',     width: 75,  field: 'assignee'      },
     { heading: 'Last Comment', width: 600, field: 'latestComment' },
+    { heading: 'Dependency Summary', width: 400, field: 'dependencySummary' }
   ],
 
   // AI summary section — set enabled: true and configure your Claude API key via
@@ -56,7 +59,7 @@ var CONFIG = {
     enabled: true,
 
     // Claude model to use for summarization
-    model: 'claude-opus-4-6',
+    model: 'claude-sonnet-4-6',
 
     // Prompt sent to Claude. The full text of all KR comments is appended after this.
     // The format contract (SECTION:/ITEM:) must be preserved if you edit this prompt —
@@ -76,5 +79,23 @@ var CONFIG = {
             '- You may use **bold** within ITEM text to emphasize key terms\n' +
             '- Include 2-4 ITEMs per section. Be specific. Omit filler language.\n' +
             '- If a section has nothing to report, write one ITEM: Nothing to report.\n\n'
+  },
+
+  // Dependency analysis for per-ticket AI summaries
+  // Used when columns include field: 'dependencySummary'
+  dependencyAnalysis: {
+    enabled: true,              // Master switch
+    maxDepth: 2,                // How many levels of links to traverse
+    cutoffDays: 14,             // Only include issues updated in last N days
+    linkTypes: 'all',           // 'all' or array like ['fulfills', 'relates to', 'blocks']
+    model: 'default',           // Claude model to use ('default' uses aiSummary.model, or specify like 'claude-3-5-sonnet-20241022')
+
+    // Per-ticket AI prompt (prepended to dependency digest)
+    prompt: 'Analyze the following ticket and its linked dependencies, paying special attention to the latest comments from team members. ' +
+            'Provide a concise summary (3-4 sentences max) covering: ' +
+            '1) Overall progress/status based on linked ticket statuses and comments, ' +
+            '2) Key risks, blockers, or concerns mentioned in comments. ' +
+            'Reference specific ticket keys (e.g., PROJ-123) when mentioning progress or issues - these will become clickable links. ' +
+            'Be specific and actionable.\n\n'
   }
 };

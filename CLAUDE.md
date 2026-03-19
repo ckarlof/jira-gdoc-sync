@@ -20,9 +20,9 @@ npm run test:watch  # re-run on file save
 
 Tests live in `tests/`. They load `Code.gs` into a Node VM with all Apps Script globals stubbed out, so no Google account or internet connection is needed.
 
-**What is tested:** `adfToBlocks`, `autoLinkSegments`, `buildCommentDigest`, `buildAttentionItems`
+**What is tested:** `adfToBlocks`, `autoLinkSegments`, `buildCommentDigest`, `buildAttentionItems`, `buildDependencyDigest`, `parseTicketSummaries`
 
-**What is not tested:** anything that calls `UrlFetchApp`, `DocumentApp`, `PropertiesService`, or `DriveApp` — those require the live Apps Script runtime.
+**What is not tested:** anything that calls `UrlFetchApp`, `DocumentApp`, `PropertiesService`, or `DriveApp` — those require the live Apps Script runtime. Dependency tree fetching (`fetchIssueWithLinks`, `fetchDependencyTree`, `buildDependencyTreeForIssues`) and AI summary generation (`generateBatchedTicketSummaries`) require live Jira/Claude API access.
 
 ### Manual testing (Apps Script runtime)
 
@@ -44,6 +44,7 @@ Single `CONFIG` object with:
 - `style` — header colors (`headerBgColor`, `headerTextColor`)
 - `columns` — array of `{ heading, width, field }` defining the table columns
 - `aiSummary` — Claude API settings (enabled flag, model, prompt)
+- `dependencyAnalysis` — settings for per-ticket dependency analysis (enabled, maxDepth, cutoffDays, linkTypes, prompt)
 
 ### `Code.gs` — key functions in order
 
@@ -62,11 +63,17 @@ Single `CONFIG` object with:
 | `sortIssues` | Sorts issues by `CONFIG.sortOrder` |
 | `fetchChildIssues` / `fetchParentData` | Fetches parent summary + child issues |
 | `fetchFlatIssues` | Fetches a specific list of issue keys directly |
+| `fetchIssueWithLinks` | Fetches a single issue with expanded issuelinks; normalizes link data |
+| `fetchDependencyTree` | Recursively fetches linked issues up to maxDepth; filters by cutoff date |
+| `buildDependencyTreeForIssues` | Builds dependency trees for all issues in parallel |
 | `renderCell` | Dispatches cell rendering by `col.field` |
 | `appendIssueTable` | Builds one styled table in the document |
 | `buildTables` | Main entry point — clears doc, writes timestamp, builds comment cache, runs AI summary, renders all sections |
 | `buildCommentCache` / `buildCommentDigest` / `buildAttentionItems` | Comment cache and AI input preparation |
+| `buildDependencyDigest` | Converts dependency tree to text format for AI consumption |
 | `generateAiSummary` / `writeSummaryToDoc` | Claude API integration for executive summary |
+| `generateBatchedTicketSummaries` | Generates AI summaries for multiple tickets in batched Claude API calls |
+| `parseTicketSummaries` | Parses Claude's batched ticket summary response |
 | `parseBoldSegments` / `applyBoldSegments` | Handle `**bold**` spans in AI output |
 | `configureCredentials` / `configureClaudeKey` | Menu-driven credential storage in PropertiesService |
 | `onOpen` | Registers the Jira Sync menu |
