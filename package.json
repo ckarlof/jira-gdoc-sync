@@ -6,6 +6,10 @@
     "test:watch": "jest --watch"
   },
   "devDependencies": {
-    "jest": "^29.0.0"
+    "jest": "^30.3.0"
+  },
+  "overrides": {
+    "glob": "^13.0.0",
+    "test-exclude": "^8.0.0"
   }
 }
