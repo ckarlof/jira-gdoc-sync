@@ -10,7 +10,7 @@ The script writes:
 - An optional **AI summary** block with two sections — *Progress & Wins* and *Risks & Blockers* — and a *Needs Attention* list for tickets that are unassigned, have no comments, or have stale comments (>14 days)
 - One or more **tables**, each with a heading and configurable columns
 
-Columns are fully configurable (heading label, width, Jira field). Built-in fields include `summary` (linked to Jira), `assignee`, `latestComment` (full rich-text formatting), `dependencySummary` (AI-powered analysis of linked issues), `status`, and `priority`. Any raw Jira field name also works.
+Columns are fully configurable (heading label, width, Jira field). Built-in fields include `summary` (linked to Jira), `assignee`, `latestComment` (full rich-text formatting), `secondLatestComment` (second most recent comment), `dependencySummary` (AI-powered analysis of linked issues), `status`, and `priority`. Any raw Jira field name also works.
 
 ## Setup
 
@@ -73,7 +73,8 @@ var CONFIG = {
   },
 
   // Table columns — heading label, width (points), and Jira field to render.
-  // Built-in fields: 'summary', 'assignee', 'latestComment', 'dependencySummary', 'status', 'priority'
+  // Built-in fields: 'summary', 'assignee', 'latestComment', 'secondLatestComment',
+  //                  'dependencySummary', 'status', 'priority'
   // Any other value is treated as a raw Jira field name (e.g. 'customfield_10016').
   columns: [
     { heading: 'Summary',      width: 175, field: 'summary'       },
@@ -126,7 +127,7 @@ The script can analyze linked Jira issues for each ticket and generate per-ticke
 
 **How it works:**
 
-1. **Fetches linked issues** — For each ticket in the table, recursively fetches all linked issues (e.g., "fulfilled by", "blocks", "relates to") up to a configurable depth (default: 2 levels)
+1. **Fetches linked issues and children** — For each ticket in the table, recursively fetches all linked issues (e.g., "fulfilled by", "blocks", "relates to") and direct child issues up to a configurable depth (default: 2 levels)
 2. **Filters by activity** — Only includes issues updated within a configurable time window (default: 14 days)
 3. **Gathers comments** — Fetches the latest comment from each linked issue to provide context
 4. **Generates AI summary** — Uses Claude to analyze the full dependency tree and summarize progress/risks in 3-4 sentences
@@ -157,7 +158,7 @@ columns: [
 
 **Performance:** For a table with 10 tickets each having 5 linked issues, expect ~50-60 Jira API calls and 1-2 Claude API calls. Runtime adds ~5-10 seconds. Cost is approximately $0.50-$1.00 per run depending on model choice.
 
-**Tip:** Set `model: 'claude-3-5-sonnet-20241022'` in `dependencyAnalysis` to use a faster, cheaper model for dependency summaries while keeping a more capable model for the main document summary.
+**Tip:** Set `model: 'claude-haiku-4-5'` in `dependencyAnalysis` to use a faster, cheaper model for dependency summaries while keeping a more capable model for the main document summary.
 
 ## Best practices
 

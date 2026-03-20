@@ -37,12 +37,13 @@ var CONFIG = {
   // Table columns — defines heading label, width (points), and which Jira field to render.
   //
   // Built-in field values:
-  //   'summary'            — KR summary text, hyperlinked to Jira
-  //   'assignee'           — assignee display name (plain text)
-  //   'latestComment'      — most recent comment with full rich-text formatting
-  //   'dependencySummary'  — AI-powered analysis of linked issues (requires dependencyAnalysis.enabled)
-  //   'status'             — issue status name (plain text)
-  //   'priority'           — priority name (plain text)
+  //   'summary'              — KR summary text, hyperlinked to Jira
+  //   'assignee'             — assignee display name (plain text)
+  //   'latestComment'        — most recent comment with full rich-text formatting
+  //   'secondLatestComment'  — second most recent comment with full rich-text formatting
+  //   'dependencySummary'    — AI-powered analysis of linked issues (requires dependencyAnalysis.enabled)
+  //   'status'               — issue status name (plain text)
+  //   'priority'             — priority name (plain text)
   //
   // Any other value is treated as a raw Jira field name (e.g. 'customfield_10016')
   // and rendered as plain text.  The field must be a simple scalar or have a .name
@@ -50,7 +51,8 @@ var CONFIG = {
   columns: [
     { heading: 'Summary',      width: 150, field: 'summary'       },
     { heading: 'Assignee',     width: 75,  field: 'assignee'      },
-    { heading: 'Last Comment', width: 600, field: 'latestComment' },
+    { heading: 'Last Comment', width: 400, field: 'latestComment' },
+    { heading: 'Second Last Comment', width: 400, field: 'secondLatestComment' },
     { heading: 'Dependency Summary', width: 400, field: 'dependencySummary' }
   ],
 

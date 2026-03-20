@@ -331,16 +331,17 @@ function writeBlocksToCell(cell, blocks) {
  * date is null when there are no comments or the date cannot be parsed.
  * blocks is the rich-text block array ready for writeBlocksToCell.
  */
-function getLatestCommentMeta(ticketId) {
+function getLatestCommentMeta(ticketId, index) {
+  index = index || 0;
   var EMPTY = { bold: false, italic: false, underline: false,
                 strike: false, code: false, url: null, bgColor: null, fgColor: null };
-  var result = jiraGet('/rest/api/3/issue/' + ticketId + '/comment?orderBy=-created&maxResults=1');
+  var result = jiraGet('/rest/api/3/issue/' + ticketId + '/comment?orderBy=-created&maxResults=' + (index + 1));
   if (result.code !== 200)
     return { blocks: [{ type: 'para', segments: [Object.assign({ text: 'Error ' + result.code }, EMPTY)] }], date: null };
   var data = JSON.parse(result.body);
-  if (!data.comments || data.comments.length === 0)
+  if (!data.comments || data.comments.length <= index)
     return { blocks: [{ type: 'para', segments: [Object.assign({ text: '(no comments)' }, EMPTY)] }], date: null };
-  var c      = data.comments[0];
+  var c      = data.comments[index];
   var author = c.author ? c.author.displayName : 'Unknown';
   var dateStr = c.created ? c.created.substring(0, 10) : '';
   var date    = c.created ? new Date(c.created) : null;
@@ -495,7 +496,7 @@ function jiraFieldsForColumns() {
   var fields = { summary: true, assignee: true };
   var needsDepFields = false;
   (CONFIG.columns || []).forEach(function(col) {
-    if (col.field && col.field !== 'latestComment' && col.field !== 'dependencySummary') {
+    if (col.field && col.field !== 'latestComment' && col.field !== 'secondLatestComment' && col.field !== 'dependencySummary') {
       fields[col.field] = true;
     }
     if (col.field === 'dependencySummary') {
@@ -885,6 +886,11 @@ function renderCell(cell, col, kr, commentCache) {
     case 'latestComment':
       var meta = commentCache[kr.key];
       writeBlocksToCell(cell, meta ? meta.blocks : getLatestComment(kr.key));
+      break;
+
+    case 'secondLatestComment':
+      var meta2 = commentCache[kr.key + ':2'];
+      writeBlocksToCell(cell, meta2 ? meta2.blocks : getLatestCommentMeta(kr.key, 1).blocks);
       break;
 
     case 'status':
@@ -1341,9 +1347,11 @@ function parseTicketSummaries(claudeResponse) {
  */
 function buildCommentCache(objectiveDataList) {
   var cache = {};
+  var needsSecond = (CONFIG.columns || []).some(function(col) { return col.field === 'secondLatestComment'; });
   objectiveDataList.forEach(function(obj) {
     obj.krs.forEach(function(kr) {
       if (!cache[kr.key]) cache[kr.key] = getLatestCommentMeta(kr.key);
+      if (needsSecond && !cache[kr.key + ':2']) cache[kr.key + ':2'] = getLatestCommentMeta(kr.key, 1);
     });
   });
   return cache;
