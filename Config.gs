@@ -88,7 +88,7 @@ var CONFIG = {
     maxDepth: 2,                // How many levels of links to traverse
     cutoffDays: 14,             // Only include issues updated in last N days
     linkTypes: 'all',           // 'all' or array like ['fulfills', 'relates to', 'blocks']
-    model: 'default',           // Claude model to use ('default' uses aiSummary.model, or specify like 'claude-3-5-sonnet-20241022')
+    model: 'claude-haiku-4-5',           // Claude model to use ('default' uses aiSummary.model, or specify like 'claude-3-5-sonnet-20241022')
 
     // Per-ticket AI prompt (prepended to dependency digest)
     prompt: 'Analyze the following ticket and its linked dependencies, paying special attention to the latest comments from team members. ' +
