@@ -20,7 +20,8 @@ var CONFIG = {
   //
   tables: [
     { parentKeys: ['INFOKR-1', 'INFOKR-3', 'INFOKR-5', 'INFOKR-6'] }
-// { parentKeys: ['INFOKR-1'] }
+//   { parentKeys: ['INFOKR-1'] }
+//    { title: 'OKRs', keys: ['INFOKR-7', 'INFOKR-23'] }
   ],
 
   // How issues are ordered within each table.
@@ -85,7 +86,7 @@ var CONFIG = {
   // Used when columns include field: 'dependencySummary'
   dependencyAnalysis: {
     enabled: true,              // Master switch
-    maxDepth: 2,                // How many levels of links to traverse
+    maxDepth: 1,                // How many levels of links to traverse
     cutoffDays: 14,             // Only include issues updated in last N days
     linkTypes: 'all',           // 'all' or array like ['fulfills', 'relates to', 'blocks']
     model: 'claude-haiku-4-5',           // Claude model to use ('default' uses aiSummary.model, or specify like 'claude-3-5-sonnet-20241022')

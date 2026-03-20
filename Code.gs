@@ -678,7 +678,7 @@ function fetchIssueWithLinks(issueKey, fields) {
  * Returns { nodes: [issueRecords], links: [{from, to, type, direction}] }.
  */
 function fetchDependencyTree(rootKey, maxDepth, cutoffDate, visitedKeys) {
-  if (maxDepth === 0 || visitedKeys[rootKey]) {
+  if (visitedKeys[rootKey]) {
     return { nodes: [], links: [] };
   }
 
@@ -691,6 +691,12 @@ function fetchDependencyTree(rootKey, maxDepth, cutoffDate, visitedKeys) {
 
   var allNodes = [rootIssue];
   var allLinks = [];
+
+  // At depth 0, return the issue itself but don't recurse further.
+  // Callers use the returned nodes to check the cutoff date.
+  if (maxDepth === 0) {
+    return { nodes: allNodes, links: allLinks };
+  }
 
   var totalLinks = (rootIssue.links || []).length;
   var processedCount = 0;
@@ -744,6 +750,43 @@ function fetchDependencyTree(rootKey, maxDepth, cutoffDate, visitedKeys) {
     Logger.log('  → Processed ' + processedCount + ' of ' + totalLinks + ' links ' +
                '(skipped: ' + skippedOldCount + ' old, ' + skippedVisitedCount + ' visited) ' +
                '(depth=' + maxDepth + ')');
+  }
+
+  // Also discover child issues (parent = rootKey)
+  var childSearchResult = jiraSearch('parent = ' + rootKey, ['summary', 'updated'], 100);
+  if (childSearchResult.code === 200) {
+    var childData = JSON.parse(childSearchResult.body);
+    var childIssues = childData.issues || [];
+    if (childIssues.length > 0) {
+      Logger.log('  → Found ' + childIssues.length + ' child issue(s) for ' + rootKey);
+    }
+    childIssues.forEach(function(rawChild) {
+      var childKey = rawChild.key;
+      if (visitedKeys[childKey]) {
+        Logger.log('  ✗ Skipping child ' + childKey + ' - already visited (cycle prevention)');
+        return;
+      }
+
+      var childTree = fetchDependencyTree(childKey, maxDepth - 1, cutoffDate, visitedKeys);
+
+      if (childTree.nodes && childTree.nodes.length > 0) {
+        var childIssue = childTree.nodes[0];
+
+        // Check updated date
+        if (childIssue.fields && childIssue.fields.updated) {
+          var updatedDate = new Date(childIssue.fields.updated);
+          if (updatedDate < cutoffDate) {
+            var daysAgo = Math.floor((Date.now() - updatedDate.getTime()) / (24 * 60 * 60 * 1000));
+            Logger.log('  ✗ Skipping child ' + childKey + ' - updated ' + daysAgo + ' days ago');
+            return;
+          }
+        }
+
+        allLinks.push({ from: rootKey, to: childKey, type: 'child', direction: 'outward' });
+        allNodes = allNodes.concat(childTree.nodes);
+        allLinks = allLinks.concat(childTree.links);
+      }
+    });
   }
 
   return { nodes: allNodes, links: allLinks };
