@@ -19,9 +19,9 @@ var CONFIG = {
   //    'title' is required in flat mode (used as the heading above the table).
   //
   tables: [
-    { parentKeys: ['INFOKR-1', 'INFOKR-3', 'INFOKR-5', 'INFOKR-6'] }
+//    { parentKeys: ['INFOKR-1', 'INFOKR-3', 'INFOKR-5', 'INFOKR-6'] }
 //   { parentKeys: ['INFOKR-1'] }
-//    { title: 'OKRs', keys: ['INFOKR-7', 'INFOKR-23'] }
+    { title: 'OKRs', keys: ['INFOKR-7', 'INFOKR-23'] }
   ],
 
   // How issues are ordered within each table.
@@ -95,10 +95,8 @@ var CONFIG = {
 
     // Per-ticket AI prompt (prepended to dependency digest)
     prompt: 'Analyze the following ticket and its linked dependencies, paying special attention to the latest comments from team members. ' +
-            'Provide a concise summary (3-4 sentences max) covering: ' +
-            '1) Overall progress/status based on linked ticket statuses and comments, ' +
-            '2) Key risks, blockers, or concerns mentioned in comments. ' +
-            'Reference specific ticket keys (e.g., PROJ-123) when mentioning progress or issues - these will become clickable links. ' +
-            'Be specific and actionable.\n\n'
+            'Under Accomplished: list notable completions, shipped work, or resolved blockers based on ticket statuses and comments. ' +
+            'Under At Risk: list active blockers, slipping timelines, unresolved concerns, or dependencies with no recent activity. ' +
+            'Be specific — reference ticket keys and quote or paraphrase key comments where relevant.\n\n'
   }
 };

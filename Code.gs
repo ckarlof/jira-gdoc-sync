@@ -903,9 +903,12 @@ function renderCell(cell, col, kr, commentCache) {
 
     case 'dependencySummary':
       var summaryCache = commentCache._depSummaries || {};
-      var summaryText = summaryCache[kr.key] || '(dependency analysis not available)';
-      // Auto-link ticket keys in the summary
-      setTextWithTicketLinks(cell, summaryText);
+      var depSummary = summaryCache[kr.key];
+      if (Array.isArray(depSummary)) {
+        writeBlocksToCell(cell, depSummary);
+      } else {
+        cell.setText(depSummary || '(dependency analysis not available)');
+      }
       break;
 
     default:
@@ -1225,11 +1228,17 @@ function generateBatchedTicketSummaries(depDigests) {
                ' (' + batch.length + ' tickets)...');
 
     // Build batched prompt
-    var batchPrompt = 'Analyze the following tickets. For each ticket, respond with:\n' +
+    var batchPrompt = 'Analyze the following tickets. For each ticket, respond with exactly this format:\n' +
                       'TICKET:[ticket-key]\n' +
-                      'SUMMARY:[your 2-3 sentence summary]\n\n' +
-                      'IMPORTANT: In your summary, reference specific ticket keys (like PROJ-123) when mentioning progress, blockers, or risks. ' +
-                      'These will be automatically converted to clickable links.\n\n' +
+                      'SECTION:Accomplished\n' +
+                      'ITEM:[notable accomplishment]\n' +
+                      'SECTION:At Risk\n' +
+                      'ITEM:[risk or blocker]\n\n' +
+                      'Rules:\n' +
+                      '- Include 1-3 ITEMs per section.\n' +
+                      '- If a section has nothing to report, write: ITEM: Nothing to report.\n' +
+                      '- Reference specific ticket keys (e.g. PROJ-123) in item text — they become clickable links.\n' +
+                      '- Only output lines starting with TICKET:, SECTION:, or ITEM: — no other text.\n\n' +
                       prompt + '\n\n';
 
     batch.forEach(function(item) {
@@ -1303,40 +1312,45 @@ function generateBatchedTicketSummaries(depDigests) {
 
 /**
  * Parses Claude's batched ticket summary response.
- * Expected format: TICKET:[KEY]\nSUMMARY:[text]
+ * Expected format: TICKET:[KEY]\nSECTION:[heading]\nITEM:[bullet]\n...
+ * Returns { [key]: blocks[] } where blocks are ready for writeBlocksToCell.
  */
 function parseTicketSummaries(claudeResponse) {
   var results = {};
   if (!claudeResponse) return results;
 
+  var EMPTY = { bold: false, italic: false, underline: false,
+                strike: false, code: false, url: null, bgColor: null, fgColor: null };
+
   var lines = claudeResponse.split('\n');
   var currentTicket = null;
-  var currentSummary = [];
+  var currentBlocks = [];
 
   lines.forEach(function(line) {
-    var ticketMatch = line.match(/^TICKET:\s*(.+)$/);
-    var summaryMatch = line.match(/^SUMMARY:\s*(.+)$/);
+    var ticketMatch  = line.match(/^TICKET:\s*(.+)$/);
+    var sectionMatch = line.match(/^SECTION:\s*(.+)$/);
+    var itemMatch    = line.match(/^ITEM:\s*(.+)$/);
 
     if (ticketMatch) {
-      // Save previous ticket if exists
-      if (currentTicket) {
-        results[currentTicket] = currentSummary.join(' ').trim();
-      }
-      // Start new ticket
+      if (currentTicket) results[currentTicket] = currentBlocks;
       currentTicket = ticketMatch[1].trim();
-      currentSummary = [];
-    } else if (summaryMatch && currentTicket) {
-      currentSummary.push(summaryMatch[1].trim());
-    } else if (currentTicket && line.trim() && !line.match(/^---/)) {
-      // Continue multi-line summary
-      currentSummary.push(line.trim());
+      currentBlocks = [];
+    } else if (sectionMatch && currentTicket) {
+      currentBlocks.push({
+        type: 'para',
+        segments: [Object.assign({ text: sectionMatch[1].trim() }, EMPTY, { bold: true })]
+      });
+    } else if (itemMatch && currentTicket) {
+      currentBlocks.push({
+        type: 'listItem',
+        level: 0,
+        ordered: false,
+        segments: [Object.assign({ text: itemMatch[1].trim() }, EMPTY)]
+      });
     }
   });
 
-  // Save last ticket
-  if (currentTicket) {
-    results[currentTicket] = currentSummary.join(' ').trim();
-  }
+  if (currentTicket) results[currentTicket] = currentBlocks;
 
   return results;
 }

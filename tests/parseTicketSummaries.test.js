@@ -40,117 +40,113 @@ function loadCodeWithStubs() {
 describe('parseTicketSummaries', () => {
   const { parseTicketSummaries } = loadCodeWithStubs();
 
-  test('parses single ticket response', () => {
-    const response = 'TICKET:PROJ-1\nSUMMARY:On track. All dependencies complete.';
+  test('parses section heading as bold para block', () => {
+    const response = 'TICKET:PROJ-1\nSECTION:Accomplished\nITEM:Shipped the feature';
     const result = parseTicketSummaries(response);
+    const blocks = result['PROJ-1'];
 
-    expect(result).toEqual({
-      'PROJ-1': 'On track. All dependencies complete.'
-    });
+    expect(blocks[0].type).toBe('para');
+    expect(blocks[0].segments[0].text).toBe('Accomplished');
+    expect(blocks[0].segments[0].bold).toBe(true);
   });
 
-  test('parses multiple tickets', () => {
+  test('parses item as listItem block', () => {
+    const response = 'TICKET:PROJ-1\nSECTION:Accomplished\nITEM:Shipped the feature';
+    const blocks = parseTicketSummaries(response)['PROJ-1'];
+
+    expect(blocks[1].type).toBe('listItem');
+    expect(blocks[1].level).toBe(0);
+    expect(blocks[1].ordered).toBe(false);
+    expect(blocks[1].segments[0].text).toBe('Shipped the feature');
+    expect(blocks[1].segments[0].bold).toBe(false);
+  });
+
+  test('parses two sections with items', () => {
     const response = `TICKET:PROJ-1
-SUMMARY:On track. Making good progress.
+SECTION:Accomplished
+ITEM:Deployed new auth service
+ITEM:Completed API integration
+SECTION:At Risk
+ITEM:Database migration delayed`;
+
+    const blocks = parseTicketSummaries(response)['PROJ-1'];
+
+    expect(blocks).toHaveLength(5);
+    expect(blocks[0]).toMatchObject({ type: 'para',     segments: [{ text: 'Accomplished',              bold: true  }] });
+    expect(blocks[1]).toMatchObject({ type: 'listItem', segments: [{ text: 'Deployed new auth service',  bold: false }] });
+    expect(blocks[2]).toMatchObject({ type: 'listItem', segments: [{ text: 'Completed API integration',  bold: false }] });
+    expect(blocks[3]).toMatchObject({ type: 'para',     segments: [{ text: 'At Risk',                    bold: true  }] });
+    expect(blocks[4]).toMatchObject({ type: 'listItem', segments: [{ text: 'Database migration delayed', bold: false }] });
+  });
+
+  test('parses multiple tickets independently', () => {
+    const response = `TICKET:PROJ-1
+SECTION:Accomplished
+ITEM:Done
 
 TICKET:PROJ-2
-SUMMARY:Behind schedule. Blocked by infrastructure issues.`;
+SECTION:At Risk
+ITEM:Blocked`;
 
     const result = parseTicketSummaries(response);
 
-    expect(result).toEqual({
-      'PROJ-1': 'On track. Making good progress.',
-      'PROJ-2': 'Behind schedule. Blocked by infrastructure issues.'
-    });
-  });
-
-  test('handles multi-line summaries', () => {
-    const response = `TICKET:PROJ-1
-SUMMARY:On track. Making good progress.
-Additional details on second line.`;
-
-    const result = parseTicketSummaries(response);
-
-    expect(result['PROJ-1']).toContain('On track. Making good progress.');
-    expect(result['PROJ-1']).toContain('Additional details on second line.');
+    expect(result['PROJ-1']).toHaveLength(2);
+    expect(result['PROJ-1'][0].segments[0].text).toBe('Accomplished');
+    expect(result['PROJ-2']).toHaveLength(2);
+    expect(result['PROJ-2'][0].segments[0].text).toBe('At Risk');
   });
 
   test('ignores separator lines (---)', () => {
     const response = `--- Ticket: PROJ-1 ---
 TICKET:PROJ-1
-SUMMARY:Progress is good.
+SECTION:Accomplished
+ITEM:Progress is good.
 
 --- Ticket: PROJ-2 ---
 TICKET:PROJ-2
-SUMMARY:Some delays.`;
+SECTION:At Risk
+ITEM:Some delays.`;
 
     const result = parseTicketSummaries(response);
 
-    expect(result).toEqual({
-      'PROJ-1': 'Progress is good.',
-      'PROJ-2': 'Some delays.'
-    });
+    expect(result['PROJ-1'][1].segments[0].text).toBe('Progress is good.');
+    expect(result['PROJ-2'][1].segments[0].text).toBe('Some delays.');
   });
 
   test('handles missing TICKET marker gracefully', () => {
-    const response = 'SUMMARY:This summary has no ticket key.';
-    const result = parseTicketSummaries(response);
-
-    expect(result).toEqual({});
+    const response = 'SECTION:Accomplished\nITEM:Some work done.';
+    expect(parseTicketSummaries(response)).toEqual({});
   });
 
-  test('handles missing SUMMARY marker', () => {
-    const response = 'TICKET:PROJ-1\nSome text but no SUMMARY: prefix';
+  test('trims whitespace from ticket keys and item text', () => {
+    const response = 'TICKET:  PROJ-1  \nSECTION:  Accomplished  \nITEM:  Making progress.  ';
     const result = parseTicketSummaries(response);
 
-    // Should still capture text after TICKET marker
-    expect(result['PROJ-1']).toBe('Some text but no SUMMARY: prefix');
-  });
-
-  test('trims whitespace from ticket keys and summaries', () => {
-    const response = 'TICKET:  PROJ-1  \nSUMMARY:  Making progress.  ';
-    const result = parseTicketSummaries(response);
-
-    expect(result).toEqual({
-      'PROJ-1': 'Making progress.'
-    });
+    expect(result['PROJ-1']).toBeDefined();
+    expect(result['PROJ-1'][0].segments[0].text).toBe('Accomplished');
+    expect(result['PROJ-1'][1].segments[0].text).toBe('Making progress.');
   });
 
   test('handles empty response', () => {
-    const result = parseTicketSummaries('');
-    expect(result).toEqual({});
+    expect(parseTicketSummaries('')).toEqual({});
   });
 
   test('handles null response', () => {
-    const result = parseTicketSummaries(null);
-    expect(result).toEqual({});
+    expect(parseTicketSummaries(null)).toEqual({});
   });
 
   test('preserves last ticket when no final newline', () => {
-    const response = 'TICKET:PROJ-1\nSUMMARY:First ticket\nTICKET:PROJ-2\nSUMMARY:Last ticket without newline';
+    const response = 'TICKET:PROJ-1\nSECTION:Accomplished\nITEM:First\nTICKET:PROJ-2\nSECTION:At Risk\nITEM:Last';
     const result = parseTicketSummaries(response);
 
-    expect(result).toEqual({
-      'PROJ-1': 'First ticket',
-      'PROJ-2': 'Last ticket without newline'
-    });
+    expect(result['PROJ-1'][1].segments[0].text).toBe('First');
+    expect(result['PROJ-2'][1].segments[0].text).toBe('Last');
   });
 
-  test('handles tickets with colons in summary text', () => {
-    const response = 'TICKET:PROJ-1\nSUMMARY:Status: On track. Risk: None.';
-    const result = parseTicketSummaries(response);
+  test('item text with colons is preserved intact', () => {
+    const response = 'TICKET:PROJ-1\nSECTION:At Risk\nITEM:Status: blocked. Reason: awaiting PROJ-2.';
+    const blocks = parseTicketSummaries(response)['PROJ-1'];
 
-    expect(result['PROJ-1']).toBe('Status: On track. Risk: None.');
-  });
-
-  test('multiple SUMMARY lines are concatenated', () => {
-    const response = `TICKET:PROJ-1
-SUMMARY:First part of summary.
-SUMMARY:Second part of summary.`;
-
-    const result = parseTicketSummaries(response);
-
-    expect(result['PROJ-1']).toContain('First part of summary.');
-    expect(result['PROJ-1']).toContain('Second part of summary.');
+    expect(blocks[1].segments[0].text).toBe('Status: blocked. Reason: awaiting PROJ-2.');
   });
 });
